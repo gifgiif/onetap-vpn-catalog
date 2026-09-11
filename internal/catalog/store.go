@@ -98,7 +98,7 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 	if err != nil {
 		return err
 	}
-	signed := SignedCatalog{Payload: payload, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(s.privateKey, bytes)), KeyID: "pilot-2026-01"}
+	signed := SignedCatalog{Payload: payload, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(s.privateKey, bytes)), KeyID: KeyID}
 	if s.revisionFile != "" {
 		if err := persistSnapshot(s.revisionFile, signed); err != nil {
 			return err
