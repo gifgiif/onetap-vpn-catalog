@@ -1,0 +1,6 @@
+# Signing material and a local catalog are never committed.
+.local-catalog-private-key
+.local-catalog-revision
+
+# Local binaries are platform-specific; CI downloads its pinned Linux binary.
+bin/

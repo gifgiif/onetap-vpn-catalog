@@ -1,0 +1,47 @@
+name: Refresh server catalog
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Offset from the top of the hour, when scheduled GitHub jobs are often busy.
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+      - name: Download pinned Xray core
+        env:
+          XRAY_VERSION: v25.8.3
+          XRAY_SHA256: f3f69cdccdf3443f25248f65bec0f621a7bd05c9d6fbbd5d9f064a8fce70f0fc
+        run: |
+          curl --fail --location --retry 3 --output xray.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          echo "${XRAY_SHA256}  xray.zip" | sha256sum --check --strict
+          unzip -q xray.zip xray
+          chmod 0755 xray
+      - name: Check public VLESS candidates and sign catalog
+        env:
+          CATALOG_SIGNING_PRIVATE_KEY: ${{ secrets.CATALOG_SIGNING_PRIVATE_KEY }}
+          XRAY_BIN: ${{ github.workspace }}/xray
+          CATALOG_OUTPUT: public/catalog.json
+        run: go run ./cmd/publish
+      - name: Publish only a changed catalog
+        run: |
+          if git diff --quiet -- public/catalog.json; then exit 0; fi
+          git config user.name 'OneTap catalog bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add public/catalog.json
+          git commit -m 'Refresh verified server catalog'
+          git push
