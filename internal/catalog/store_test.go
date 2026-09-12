@@ -1,8 +1,7 @@
 package catalog
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
@@ -10,7 +9,7 @@ import (
 )
 
 func TestStoreSignsCatalog(t *testing.T) {
-	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	if err := store.ReplaceFromLines("test", []string{"vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)
@@ -18,13 +17,13 @@ func TestStoreSignsCatalog(t *testing.T) {
 	catalog := store.Current()
 	payload, _ := json.Marshal(catalog.Payload)
 	signature, _ := base64.StdEncoding.DecodeString(catalog.Signature)
-	if !ed25519.Verify(pub, payload, signature) {
+	if !VerifyPayloadSignature(&key.PublicKey, payload, signature) {
 		t.Fatal("invalid signature")
 	}
 }
 
 func TestStoreKeepsFastestEquivalentCandidateAndRanksCatalog(t *testing.T) {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	if err := store.Replace("test", []VLESS{
 		{ID: "slow", Host: "slow.example", Port: 443, UUID: "slow", Security: "tls", SNI: "slow.example", Type: "tcp", LatencyMs: 240},
@@ -44,7 +43,7 @@ func TestStoreKeepsFastestEquivalentCandidateAndRanksCatalog(t *testing.T) {
 }
 
 func TestStoreDoesNotPromoteHighLatencyOneShotThroughput(t *testing.T) {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	if err := store.Replace("test", []VLESS{
 		{ID: "responsive", Host: "responsive.example", Port: 443, UUID: "responsive", Security: "tls", SNI: "responsive.example", Type: "tcp", LatencyMs: 604, ThroughputKbps: 3_670},
@@ -60,12 +59,12 @@ func TestStoreDoesNotPromoteHighLatencyOneShotThroughput(t *testing.T) {
 }
 
 func TestStoreKeepsFreshDiverseCatalogWhenAnImportAbruptlyCollapses(t *testing.T) {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	now := time.Now().UTC()
 	store.current = SignedCatalog{Payload: Catalog{
-		Revision: 7,
-		IssuedAt: now,
+		Revision:  7,
+		IssuedAt:  now,
 		ExpiresAt: now.Add(6 * time.Hour),
 		Servers: []VLESS{
 			{ID: "de", CountryCode: "DE"}, {ID: "nl", CountryCode: "NL"},
@@ -83,12 +82,12 @@ func TestStoreKeepsFreshDiverseCatalogWhenAnImportAbruptlyCollapses(t *testing.T
 }
 
 func TestStoreAcceptsSmallerCatalogNearExpiry(t *testing.T) {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	now := time.Now().UTC()
 	store.current = SignedCatalog{Payload: Catalog{
-		Revision: 7,
-		IssuedAt: now.Add(-5 * time.Hour),
+		Revision:  7,
+		IssuedAt:  now.Add(-5 * time.Hour),
 		ExpiresAt: now.Add(20 * time.Minute),
 		Servers: []VLESS{
 			{ID: "de", CountryCode: "DE"}, {ID: "nl", CountryCode: "NL"},
@@ -106,7 +105,7 @@ func TestStoreAcceptsSmallerCatalogNearExpiry(t *testing.T) {
 }
 
 func TestPersistentStoreRetainsSignedCatalogAcrossRestart(t *testing.T) {
-	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := newTestSigningKey(t)
 	path := t.TempDir() + "/revision"
 	store, err := NewPersistentMemoryStore(key, path)
 	if err != nil {
@@ -126,7 +125,16 @@ func TestPersistentStoreRetainsSignedCatalogAcrossRestart(t *testing.T) {
 	}
 	payload, _ := json.Marshal(got.Payload)
 	signature, _ := base64.StdEncoding.DecodeString(got.Signature)
-	if !ed25519.Verify(pub, payload, signature) {
+	if !VerifyPayloadSignature(&key.PublicKey, payload, signature) {
 		t.Fatal("restored catalog signature is invalid")
 	}
+}
+
+func newTestSigningKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

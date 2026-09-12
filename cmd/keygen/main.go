@@ -1,23 +1,29 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+
+	"github.com/onetap-vpn/onetap/backend/internal/catalog"
 )
 
 func main() {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil { log.Fatal(err) }
-	der, err := x509.MarshalPKIXPublicKey(publicKey)
-	if err != nil { log.Fatal(err) }
+	privateKey, err := catalog.GenerateSigningKey()
+	if err != nil {
+		log.Fatal(err)
+	}
+	privateEncoded, err := catalog.EncodeSigningKey(privateKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	publicEncoded, err := catalog.EncodePublicSigningKey(&privateKey.PublicKey)
+	if err != nil {
+		log.Fatal(err)
+	}
 	output, _ := json.Marshal(map[string]string{
-		"privateKey": base64.StdEncoding.EncodeToString(privateKey),
-		"publicKey": base64.StdEncoding.EncodeToString(der),
+		"privateKey": privateEncoded,
+		"publicKey":  publicEncoded,
 	})
 	fmt.Println(string(output))
 }

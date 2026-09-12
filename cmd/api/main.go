@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"log"
 	"net/http"
 	"os"
@@ -87,7 +85,7 @@ func configuredImporter(store *catalog.MemoryStore) (*importer.Runner, bool) {
 	return importer.New(store, importer.DefaultSources()).WithChecker(verify.XrayChecker{Binary: binary, ProbeURL: os.Getenv("PROBE_URL")}), true
 }
 
-func signingKey() (ed25519.PrivateKey, error) {
+func signingKey() (*ecdsa.PrivateKey, error) {
 	encoded := os.Getenv("CATALOG_SIGNING_PRIVATE_KEY")
 	if encoded == "" {
 		path := os.Getenv("CATALOG_SIGNING_PRIVATE_KEY_FILE")
@@ -100,13 +98,13 @@ func signingKey() (ed25519.PrivateKey, error) {
 		}
 	}
 	if encoded != "" {
-		decoded, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil || len(decoded) != ed25519.PrivateKeySize {
+		key, err := catalog.ParseSigningKey(encoded)
+		if err != nil {
 			return nil, &keyError{}
 		}
-		return ed25519.PrivateKey(decoded), nil
+		return key, nil
 	}
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	key, err := catalog.GenerateSigningKey()
 	if err == nil {
 		log.Print("development key generated; configure CATALOG_SIGNING_PRIVATE_KEY before deployment")
 	}
@@ -116,5 +114,5 @@ func signingKey() (ed25519.PrivateKey, error) {
 type keyError struct{}
 
 func (*keyError) Error() string {
-	return "CATALOG_SIGNING_PRIVATE_KEY must be a base64 Ed25519 private key"
+	return "CATALOG_SIGNING_PRIVATE_KEY must be a base64 PKCS#8 ECDSA P-256 private key"
 }

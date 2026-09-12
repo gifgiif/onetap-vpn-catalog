@@ -2,8 +2,6 @@ package importer
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,7 +20,10 @@ func TestRefreshOnlyPublishesValidNonEmptyCatalog(t *testing.T) {
 		_, _ = w.Write([]byte("vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
 	}))
 	defer server.Close()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key, err := catalog.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := catalog.NewMemoryStore(key)
 	runner := New(store, []Source{{Name: "test", URL: server.URL}})
 	if err := runner.Refresh(context.Background()); err != nil {
@@ -38,7 +39,10 @@ func TestRefreshPublishesProbeMetrics(t *testing.T) {
 		_, _ = w.Write([]byte("vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
 	}))
 	defer server.Close()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key, err := catalog.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := catalog.NewMemoryStore(key)
 	runner := New(store, []Source{{Name: "test", URL: server.URL}}).WithChecker(successfulChecker{})
 	if err := runner.Refresh(context.Background()); err != nil {

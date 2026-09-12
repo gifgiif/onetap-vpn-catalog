@@ -7,7 +7,7 @@ const (
 	DefaultSource = "igareck/vpn-configs-for-russia"
 	// KeyID is informational but lets clients distinguish a legitimate signing
 	// key rotation from a replay of an older catalog under the same key.
-	KeyID = "static-pilot-2026-09"
+	KeyID = "static-pilot-2026-09-ecdsa-p256"
 )
 
 type VLESS struct {

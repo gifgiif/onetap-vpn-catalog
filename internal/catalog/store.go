@@ -1,7 +1,7 @@
 package catalog
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -17,19 +17,19 @@ type Store interface{ Current() SignedCatalog }
 
 type MemoryStore struct {
 	mu           sync.RWMutex
-	privateKey   ed25519.PrivateKey
+	privateKey   *ecdsa.PrivateKey
 	current      SignedCatalog
 	revisionFile string
 }
 
-func NewMemoryStore(privateKey ed25519.PrivateKey) *MemoryStore {
+func NewMemoryStore(privateKey *ecdsa.PrivateKey) *MemoryStore {
 	return &MemoryStore{privateKey: privateKey}
 }
 
 // NewPersistentMemoryStore retains the last signed catalog as well as its
 // revision. It lets phones fetch a known-good catalog immediately after an API
 // restart, while the importer is still checking a new upstream snapshot.
-func NewPersistentMemoryStore(privateKey ed25519.PrivateKey, revisionFile string) (*MemoryStore, error) {
+func NewPersistentMemoryStore(privateKey *ecdsa.PrivateKey, revisionFile string) (*MemoryStore, error) {
 	store := NewMemoryStore(privateKey)
 	store.revisionFile = revisionFile
 	saved, complete, err := readSnapshot(revisionFile, privateKey)
@@ -98,7 +98,11 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 	if err != nil {
 		return err
 	}
-	signed := SignedCatalog{Payload: payload, Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(s.privateKey, bytes)), KeyID: KeyID}
+	signature, err := SignPayload(s.privateKey, bytes)
+	if err != nil {
+		return err
+	}
+	signed := SignedCatalog{Payload: payload, Signature: base64.StdEncoding.EncodeToString(signature), KeyID: KeyID}
 	if s.revisionFile != "" {
 		if err := persistSnapshot(s.revisionFile, signed); err != nil {
 			return err
@@ -145,14 +149,14 @@ func persistSnapshot(path string, signed SignedCatalog) error {
 
 // readSnapshot accepts the legacy revision-only file for a one-time upgrade.
 // complete is false for that format, so callers never serve it as a catalog.
-func readSnapshot(path string, privateKey ed25519.PrivateKey) (saved SignedCatalog, complete bool, err error) {
+func readSnapshot(path string, privateKey *ecdsa.PrivateKey) (saved SignedCatalog, complete bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return SignedCatalog{}, false, err
 	}
 	if err := json.Unmarshal(data, &saved); err == nil && saved.Signature != "" {
 		payload, marshalErr := json.Marshal(saved.Payload)
-		if marshalErr != nil || !ed25519.Verify(privateKey.Public().(ed25519.PublicKey), payload, decodeSignature(saved.Signature)) {
+		if marshalErr != nil || !VerifyPayloadSignature(&privateKey.PublicKey, payload, decodeSignature(saved.Signature)) {
 			return SignedCatalog{}, false, &persistenceError{"saved catalog signature is invalid"}
 		}
 		if saved.Payload.SchemaVersion != SchemaVersion || saved.Payload.Revision == 0 || len(saved.Payload.Servers) == 0 {

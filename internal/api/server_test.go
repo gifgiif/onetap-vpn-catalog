@@ -2,8 +2,6 @@ package api
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +10,10 @@ import (
 )
 
 func testServer(t *testing.T) *Server {
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key, err := catalog.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := catalog.NewMemoryStore(key)
 	if err := store.ReplaceFromLines("test", []string{"vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)

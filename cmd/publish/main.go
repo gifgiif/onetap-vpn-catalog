@@ -4,8 +4,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"log"
 	"os"
 	"path/filepath"
@@ -47,16 +46,16 @@ func main() {
 	log.Printf("published revision %d with %d checked servers to %s", current.Revision, len(current.Servers), filepath.Clean(output))
 }
 
-func signingKey() ed25519.PrivateKey {
+func signingKey() *ecdsa.PrivateKey {
 	encoded := os.Getenv("CATALOG_SIGNING_PRIVATE_KEY")
 	if encoded == "" {
 		log.Fatal("CATALOG_SIGNING_PRIVATE_KEY is required")
 	}
-	key, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(key) != ed25519.PrivateKeySize {
-		log.Fatal("CATALOG_SIGNING_PRIVATE_KEY is not a valid Ed25519 private key")
+	key, err := catalog.ParseSigningKey(encoded)
+	if err != nil {
+		log.Fatalf("CATALOG_SIGNING_PRIVATE_KEY is not a valid ECDSA P-256 private key: %v", err)
 	}
-	return ed25519.PrivateKey(key)
+	return key
 }
 
 func getenv(name, fallback string) string {
