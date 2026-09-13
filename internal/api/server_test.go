@@ -15,7 +15,7 @@ func testServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	store := catalog.NewMemoryStore(key)
-	if err := store.ReplaceFromLines("test", []string{"vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
+	if err := store.ReplaceFromLines("test", []string{"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)
 	}
 	return NewServer(store, Config{})

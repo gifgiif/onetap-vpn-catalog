@@ -11,7 +11,7 @@ import (
 func TestStoreSignsCatalog(t *testing.T) {
 	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
-	if err := store.ReplaceFromLines("test", []string{"vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
+	if err := store.ReplaceFromLines("test", []string{"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)
 	}
 	catalog := store.Current()
@@ -83,7 +83,7 @@ func TestStorePublishesFreshSurvivorsEvenWhenCountryCountCollapses(t *testing.T)
 
 func TestEmptyUpdatePreservesLastSnapshotWithoutExtendingExpiry(t *testing.T) {
 	store := NewMemoryStore(newTestSigningKey(t))
-	if err := store.ReplaceFromLines("test", []string{"vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"}); err != nil {
+	if err := store.ReplaceFromLines("test", []string{"vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)
 	}
 	old := store.Current()
@@ -126,7 +126,7 @@ func TestPersistentStoreRetainsSignedCatalogAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ReplaceFromLines("test", []string{"vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
+	if err := store.ReplaceFromLines("test", []string{"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=tcp"}); err != nil {
 		t.Fatal(err)
 	}
 	want := store.Current()

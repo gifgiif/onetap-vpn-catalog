@@ -26,15 +26,21 @@ func TestParseVLESSRejectsUnsafeAndUnsupported(t *testing.T) {
 }
 
 func TestEquivalentUriKeepsIdentityAcrossFeedLabels(t *testing.T) {
-	a, err := ParseVLESS("vless://id@vpn.example.com:443?encryption=none&security=tls&type=tcp#Germany", "first")
+	a, err := ParseVLESS("vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=tcp#Germany", "first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := ParseVLESS("vless://id@vpn.example.com:443?type=tcp&security=tls&encryption=none#NewName", "second")
+	b, err := ParseVLESS("vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?type=tcp&security=tls&encryption=none#NewName", "second")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.ID != b.ID {
 		t.Fatal("display label changed effective route identity")
+	}
+}
+
+func TestParseVLESSRejectsNonUUIDIdentity(t *testing.T) {
+	if _, err := ParseVLESS("vless://nasnet@vpn.example.com:443?encryption=none&security=tls&type=tcp", "test"); err == nil {
+		t.Fatal("expected non-UUID VLESS identity to be rejected")
 	}
 }

@@ -8,9 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var vlessUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // ParseVLESS accepts a deliberately small VLESS subset. Routing, DNS and arbitrary
 // remote configuration are never imported from upstream subscriptions.
@@ -21,6 +24,12 @@ func ParseVLESS(raw, source string) (VLESS, error) {
 	}
 	if u.Hostname() == "" || u.Port() == "" {
 		return VLESS{}, fmt.Errorf("server host and port are required")
+	}
+	// The Android Xray configuration only accepts UUID VLESS identities.  Keep
+	// the published schema aligned with the client instead of advertising a
+	// route that the client will discard before it can try it.
+	if !vlessUUID.MatchString(u.User.Username()) {
+		return VLESS{}, fmt.Errorf("invalid VLESS UUID")
 	}
 	port, err := strconv.Atoi(u.Port())
 	if err != nil || port < 1 || port > 65535 {

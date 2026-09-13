@@ -53,7 +53,7 @@ func TestRefreshRechecksExistingPoolWhenFeedsAreUnavailable(t *testing.T) {
 
 func TestRefreshOnlyPublishesValidNonEmptyCatalog(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
 	}))
 	defer server.Close()
 	key, err := catalog.GenerateSigningKey()
@@ -72,7 +72,7 @@ func TestRefreshOnlyPublishesValidNonEmptyCatalog(t *testing.T) {
 
 func TestRefreshPublishesProbeMetrics(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
 	}))
 	defer server.Close()
 	key, err := catalog.GenerateSigningKey()
