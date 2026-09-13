@@ -34,6 +34,7 @@ type VLESS struct {
 type ProbeMetrics struct {
 	LatencyMs      int
 	ThroughputKbps int
+	CountryCode    string
 }
 
 type Catalog struct {

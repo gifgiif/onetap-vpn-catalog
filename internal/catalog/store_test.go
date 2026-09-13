@@ -58,7 +58,7 @@ func TestStoreDoesNotPromoteHighLatencyOneShotThroughput(t *testing.T) {
 	}
 }
 
-func TestStoreKeepsFreshDiverseCatalogWhenAnImportAbruptlyCollapses(t *testing.T) {
+func TestStorePublishesFreshSurvivorsEvenWhenCountryCountCollapses(t *testing.T) {
 	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)
 	now := time.Now().UTC()
@@ -76,8 +76,23 @@ func TestStoreKeepsFreshDiverseCatalogWhenAnImportAbruptlyCollapses(t *testing.T
 		t.Fatal(err)
 	}
 	got := store.Current().Payload
-	if got.Revision != 7 || len(got.Servers) != 6 {
-		t.Fatalf("fresh fallback was replaced by a thin catalog: %#v", got)
+	if got.Revision != 8 || len(got.Servers) != 1 || got.Servers[0].ID != "only-us" {
+		t.Fatalf("fresh survivors were hidden by the old larger catalog: %#v", got)
+	}
+}
+
+func TestEmptyUpdatePreservesLastSnapshotWithoutExtendingExpiry(t *testing.T) {
+	store := NewMemoryStore(newTestSigningKey(t))
+	if err := store.ReplaceFromLines("test", []string{"vless://id@1.1.1.1:443?encryption=none&security=tls&type=tcp"}); err != nil {
+		t.Fatal(err)
+	}
+	old := store.Current()
+	if err := store.Replace("empty", nil); err == nil {
+		t.Fatal("empty update accepted")
+	}
+	next := store.Current()
+	if old.Signature != next.Signature || old.Payload.ExpiresAt != next.Payload.ExpiresAt {
+		t.Fatal("fallback was changed")
 	}
 }
 

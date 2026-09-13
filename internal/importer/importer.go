@@ -82,19 +82,44 @@ func (r *Runner) Refresh(ctx context.Context) error {
 	if !changed && r.checker == nil {
 		return nil
 	}
-	valid := 0
 	candidates := make([]catalog.VLESS, 0, len(all))
-	for _, line := range all {
-		if server, err := catalog.ParseVLESS(line, "upstream"); err == nil {
-			valid++
-			candidates = append(candidates, server)
+	// Recheck the published pool first, even if a source is temporarily down.
+	// These entries receive new expiry only after a new successful probe.
+	if saved, ok := r.store.(interface{ Current() catalog.SignedCatalog }); ok && r.checker != nil {
+		for _, server := range saved.Current().Payload.Servers {
+			if server.Type == "tcp" {
+				candidates = append(candidates, server)
+			}
 		}
 	}
-	if valid == 0 {
+	priorCount := len(candidates)
+	seen := make(map[string]bool)
+	for _, server := range candidates {
+		seen[catalog.RouteKey(server)] = true
+	}
+	var incoming []catalog.VLESS
+	for _, line := range all {
+		if server, err := catalog.ParseVLESS(line, "upstream"); err == nil {
+			key := catalog.RouteKey(server)
+			if !seen[key] {
+				incoming = append(incoming, server)
+				seen[key] = true
+			}
+		}
+	}
+	if len(candidates)+len(incoming) == 0 {
 		return fmt.Errorf("upstream update had no valid VLESS configurations")
 	}
-	if r.maxCandidates > 0 && len(candidates) > r.maxCandidates {
-		candidates = sampleCandidates(candidates, r.maxCandidates)
+	if r.maxCandidates > 0 {
+		if priorCount > r.maxCandidates {
+			candidates = candidates[:r.maxCandidates]
+		}
+		budget := r.maxCandidates - len(candidates)
+		if budget > 0 {
+			candidates = append(candidates, sampleCandidates(incoming, budget)...)
+		}
+	} else {
+		candidates = append(candidates, incoming...)
 	}
 	if r.checker != nil {
 		candidates = r.check(ctx, candidates)
@@ -115,7 +140,8 @@ func sampleCandidates(candidates []catalog.VLESS, limit int) []catalog.VLESS {
 	selected := make([]catalog.VLESS, 0, limit)
 	step := float64(len(candidates)) / float64(limit)
 	for index := 0; index < limit; index++ {
-		position := int(float64(index) * step)
+		// A new slice each 15-minute slot, including on fresh CI workers.
+		position := (int(float64(index)*step) + int(time.Now().Unix()/900)%len(candidates)) % len(candidates)
 		selected = append(selected, candidates[position])
 	}
 	return selected
@@ -147,6 +173,10 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 			if metrics, err := r.checker.Probe(probeCtx, server); err == nil {
 				server.LatencyMs = metrics.LatencyMs
 				server.ThroughputKbps = metrics.ThroughputKbps
+				if metrics.CountryCode != "" {
+					server.CountryCode = metrics.CountryCode
+					server.CountryName = catalog.CountryName(metrics.CountryCode)
+				}
 				results <- server
 			}
 		}(server)

@@ -38,7 +38,8 @@ func main() {
 		current := store.Current().Payload
 		if current.SchemaVersion == catalog.SchemaVersion && len(current.Servers) > 0 {
 			log.Printf("refresh failed; keeping revision %d with %d servers: %v", current.Revision, len(current.Servers), err)
-			return
+			// Preserve the file, but make a missed refresh visible in Actions.
+			os.Exit(1)
 		}
 		log.Fatalf("no usable catalog: %v", err)
 	}

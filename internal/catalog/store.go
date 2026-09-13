@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +65,9 @@ func (s *MemoryStore) ReplaceFromLines(source string, lines []string) error {
 // candidates. Equivalent upstream URIs are collapsed to one effective Xray
 // configuration, retaining the lower measured latency.
 func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
+	if len(candidates) == 0 {
+		return fmt.Errorf("empty replacement must not erase the fallback catalog")
+	}
 	unique := map[string]VLESS{}
 	for _, candidate := range candidates {
 		candidate.Source = source
@@ -83,15 +87,35 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 		}
 		return servers[i].ID < servers[j].ID
 	})
+	// Leave room in the 96-probe CI budget for discovering new routes next run.
+	if len(servers) > 64 {
+		chosen := make(map[string]bool)
+		countries := make(map[string]bool)
+		var pool []VLESS
+		for _, server := range servers {
+			if !countries[server.CountryCode] && len(pool) < 64 {
+				pool = append(pool, server)
+				chosen[server.ID] = true
+				countries[server.CountryCode] = true
+			}
+		}
+		for _, server := range servers {
+			if !chosen[server.ID] && len(pool) < 64 {
+				pool = append(pool, server)
+			}
+		}
+		servers = pool
+		sort.Slice(servers, func(i, j int) bool {
+			if faster(servers[i], servers[j]) != faster(servers[j], servers[i]) {
+				return faster(servers[i], servers[j])
+			}
+			return servers[i].ID < servers[j].ID
+		})
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A just-verified catalog is a better fallback than a transiently thin
-	// upstream response. Keep it while it is still fresh; a later refresh can
-	// replace it once the source has recovered, and expiry is never extended by
-	// this guard.
-	if retainFreshCatalog(s.current.Payload, servers, time.Now().UTC()) {
-		return nil
-	}
+	// Every member of this set passed a fresh probe. Keep even a small set:
+	// a country-count heuristic must never retain known failing routes for hours.
 	revision := s.current.Payload.Revision + 1
 	payload := Catalog{SchemaVersion: SchemaVersion, Revision: revision, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(6 * time.Hour), Servers: servers}
 	bytes, err := json.Marshal(payload)
@@ -110,26 +134,6 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 	}
 	s.current = signed
 	return nil
-}
-
-func retainFreshCatalog(current Catalog, next []VLESS, now time.Time) bool {
-	if len(current.Servers) == 0 || current.ExpiresAt.Sub(now) <= 30*time.Minute {
-		return false
-	}
-	if len(next)*3 >= len(current.Servers) {
-		return false
-	}
-	return countryCount(next) < countryCount(current.Servers)
-}
-
-func countryCount(servers []VLESS) int {
-	countries := make(map[string]struct{})
-	for _, server := range servers {
-		if server.CountryCode != "" {
-			countries[server.CountryCode] = struct{}{}
-		}
-	}
-	return len(countries)
 }
 
 func persistSnapshot(path string, signed SignedCatalog) error {

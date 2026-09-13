@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/onetap-vpn/onetap/backend/internal/catalog"
@@ -38,9 +39,14 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 	if c.Timeout <= 0 {
 		c.Timeout = 12 * time.Second
 	}
-	if err := ensurePublicHost(ctx, server.Host); err != nil {
+	resolved, err := resolvePublicHost(ctx, server.Host)
+	if err != nil {
 		return catalog.ProbeMetrics{}, err
 	}
+	if server.SNI == "" {
+		server.SNI = server.Host
+	}
+	server.Host = resolved // Pin the validated answer; Xray cannot re-resolve into a private address.
 	port, err := freePort()
 	if err != nil {
 		return catalog.ProbeMetrics{}, err
@@ -78,7 +84,7 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 		return catalog.ProbeMetrics{}, err
 	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		return dialer.Dial(network, address)
+		return dialer.(proxy.ContextDialer).DialContext(ctx, network, address)
 	}}}
 	probeURL := c.ProbeURL
 	if probeURL == "" {
@@ -108,7 +114,50 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 	}
 	duration := time.Since(bodyStarted)
 	throughput := int(float64(bytes*8) / duration.Seconds() / 1_000)
-	return catalog.ProbeMetrics{LatencyMs: int(responseLatency.Milliseconds()), ThroughputKbps: throughput}, nil
+	metrics := catalog.ProbeMetrics{LatencyMs: int(responseLatency.Milliseconds()), ThroughputKbps: throughput}
+	// This optional check uses the same proxy and HTTPS validation. Failure of
+	// geolocation alone must not discard a route that can carry video traffic.
+	geoCtx, geoCancel := context.WithTimeout(checkCtx, 1500*time.Millisecond)
+	defer geoCancel()
+	geoRequest, _ := http.NewRequestWithContext(geoCtx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	if geoResponse, geoErr := client.Do(geoRequest); geoErr == nil {
+		if geoResponse.StatusCode == http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(geoResponse.Body, 4096))
+			metrics.CountryCode = traceCountry(string(body))
+		}
+		geoResponse.Body.Close()
+	}
+	return metrics, nil
+}
+
+func traceCountry(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if code, ok := strings.CutPrefix(strings.TrimSpace(line), "loc="); ok && len(code) == 2 && code[0] >= 'A' && code[0] <= 'Z' && code[1] >= 'A' && code[1] <= 'Z' && code != "XX" {
+			return code
+		}
+	}
+	return ""
+}
+
+func resolvePublicHost(ctx context.Context, host string) (string, error) {
+	if err := catalog.ValidateResolvedPublicHost(ctx, host); err != nil {
+		return "", err
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addresses) == 0 {
+		return "", fmt.Errorf("resolve destination")
+	}
+	for _, address := range addresses {
+		if err := catalog.ValidateResolvedPublicHost(ctx, address.String()); err != nil {
+			return "", err
+		}
+	}
+	for _, address := range addresses {
+		if address.Is4() {
+			return address.String(), nil
+		}
+	}
+	return addresses[0].String(), nil
 }
 
 func ensurePublicHost(ctx context.Context, host string) error {

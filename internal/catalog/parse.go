@@ -37,8 +37,13 @@ func ParseVLESS(raw, source string) (VLESS, error) {
 	if q.Get("encryption") != "none" || (security != "tls" && security != "reality") {
 		return VLESS{}, fmt.Errorf("unsupported VLESS security")
 	}
-	if networkType != "tcp" && networkType != "grpc" && networkType != "ws" {
+	if networkType != "tcp" {
 		return VLESS{}, fmt.Errorf("unsupported transport")
+	}
+	// v3 cannot represent WS paths, gRPC service names or TCP HTTP camouflage.
+	// Reject unsupported semantics instead of silently publishing a broken route.
+	if q.Get("headerType") != "" && q.Get("headerType") != "none" || q.Get("path") != "" || q.Get("serviceName") != "" {
+		return VLESS{}, fmt.Errorf("unsupported transport options")
 	}
 	if security == "tls" && q.Get("allowInsecure") == "1" {
 		return VLESS{}, fmt.Errorf("insecure TLS is forbidden")
@@ -46,9 +51,22 @@ func ParseVLESS(raw, source string) (VLESS, error) {
 	if security == "reality" && (q.Get("pbk") == "" || q.Get("sni") == "") {
 		return VLESS{}, fmt.Errorf("incomplete REALITY configuration")
 	}
-	sum := sha256.Sum256([]byte(raw))
 	code, name := countryFromLabel(u.Fragment)
-	return VLESS{ID: hex.EncodeToString(sum[:12]), Host: u.Hostname(), Port: port, UUID: u.User.Username(), Security: security, SNI: q.Get("sni"), PublicKey: q.Get("pbk"), ShortID: q.Get("sid"), Flow: q.Get("flow"), Type: networkType, Source: source, CountryCode: code, CountryName: name}, nil
+	server := VLESS{Host: strings.ToLower(u.Hostname()), Port: port, UUID: u.User.Username(), Security: security, SNI: q.Get("sni"), PublicKey: q.Get("pbk"), ShortID: q.Get("sid"), Flow: q.Get("flow"), Type: networkType, Source: source, CountryCode: code, CountryName: name}
+	sum := sha256.Sum256([]byte(candidateKey(server)))
+	server.ID = hex.EncodeToString(sum[:12])
+	return server, nil
+}
+
+// Same effective route keeps its ID when a feed renames or reorders a URI.
+func RouteKey(server VLESS) string { return candidateKey(server) }
+
+func CountryName(code string) string {
+	names := map[string]string{"DE": "Германия", "NL": "Нидерланды", "PL": "Польша", "FI": "Финляндия", "SE": "Швеция", "FR": "Франция", "GB": "Великобритания", "US": "США", "TR": "Турция", "UZ": "Узбекистан", "KZ": "Казахстан", "AM": "Армения", "AT": "Австрия", "BE": "Бельгия", "BG": "Болгария", "HR": "Хорватия", "CY": "Кипр", "CZ": "Чехия", "DK": "Дания", "EE": "Эстония", "GR": "Греция", "HU": "Венгрия", "IE": "Ирландия", "IT": "Италия", "LV": "Латвия", "LT": "Литва", "LU": "Люксембург", "MT": "Мальта", "PT": "Португалия", "RO": "Румыния", "SK": "Словакия", "SI": "Словения", "ES": "Испания", "CH": "Швейцария", "NO": "Норвегия", "CA": "Канада", "JP": "Япония", "SG": "Сингапур"}
+	if name := names[code]; name != "" {
+		return name
+	}
+	return code
 }
 
 // Country labels are advisory metadata. We only publish a country when an
@@ -102,7 +120,9 @@ func ValidateResolvedPublicHost(ctx context.Context, host string) error {
 }
 
 func validatePublicAddress(ip netip.Addr) error {
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() ||
+		netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("198.18.0.0/15").Contains(ip) || netip.MustParsePrefix("192.0.0.0/24").Contains(ip) {
 		return fmt.Errorf("non-public IP is forbidden")
 	}
 	return nil
