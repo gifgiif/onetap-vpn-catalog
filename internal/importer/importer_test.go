@@ -89,3 +89,20 @@ func TestRefreshPublishesProbeMetrics(t *testing.T) {
 		t.Fatalf("probe metrics were lost: %#v", got)
 	}
 }
+
+func TestRefreshDoesNotPublishAnUnverifiedFeedCountry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp#%F0%9F%87%A9%F0%9F%87%AA"))
+	}))
+	defer server.Close()
+	key, _ := catalog.GenerateSigningKey()
+	store := catalog.NewMemoryStore(key)
+	runner := New(store, []Source{{Name: "test", URL: server.URL}}).WithChecker(successfulChecker{})
+	if err := runner.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Current().Payload.Servers[0]
+	if got.CountryCode != "" || got.CountryName != "" {
+		t.Fatalf("unverified feed country reached the signed catalog: %#v", got)
+	}
+}

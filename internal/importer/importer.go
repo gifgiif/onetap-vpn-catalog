@@ -173,6 +173,12 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 			if metrics, err := r.checker.Probe(probeCtx, server); err == nil {
 				server.LatencyMs = metrics.LatencyMs
 				server.ThroughputKbps = metrics.ThroughputKbps
+				// A feed label is untrusted display metadata. Publish a country
+				// only when the HTTPS trace actually went through this VLESS exit;
+				// otherwise the clients show the route as automatic instead of
+				// presenting a possibly wrong flag.
+				server.CountryCode = ""
+				server.CountryName = ""
 				if metrics.CountryCode != "" {
 					server.CountryCode = metrics.CountryCode
 					server.CountryName = catalog.CountryName(metrics.CountryCode)
