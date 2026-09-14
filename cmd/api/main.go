@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,8 +40,13 @@ func main() {
 		if !ok {
 			log.Fatal("checker requires XRAY_BIN")
 		}
-		log.Print("OneTap catalog checker started")
-		runner.Run(ctx, 15*time.Minute)
+		// This command is useful for a deliberate local diagnostic, but it must
+		// never quietly turn a developer laptop or mobile hotspot into a full
+		// catalog worker. Scheduled publication belongs to GitHub Actions.
+		log.Print("OneTap catalog checker running once")
+		if err := runner.Refresh(ctx); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	server := api.NewServer(store, api.Config{
@@ -55,7 +61,14 @@ func main() {
 		if runner, ok := configuredImporter(store); !ok {
 			log.Print("WARNING: importer disabled because XRAY_BIN is not configured")
 		} else {
-			go runner.Run(ctx, 15*time.Minute)
+			// An HTTP API may warm a local catalog once. Recurring wide checks are
+			// intentionally not started here: they can spend substantial mobile
+			// traffic and are already handled by the bounded CI publisher.
+			go func() {
+				if err := runner.Refresh(ctx); err != nil {
+					log.Printf("initial local catalog refresh failed: %v", err)
+				}
+			}()
 		}
 	}
 	listenAddr := os.Getenv("LISTEN_ADDR")
@@ -82,7 +95,24 @@ func configuredImporter(store *catalog.MemoryStore) (*importer.Runner, bool) {
 	if binary == "" {
 		return nil, false
 	}
-	return importer.New(store, importer.DefaultSources()).WithChecker(verify.XrayChecker{Binary: binary, ProbeURL: os.Getenv("PROBE_URL")}), true
+	return importer.New(store, importer.DefaultSources()).
+		WithMaxCandidates(localImporterCandidateLimit()).
+		WithChecker(verify.XrayChecker{Binary: binary, ProbeURL: os.Getenv("PROBE_URL")}), true
+}
+
+// Local API mode is never the publisher. Keep its diagnostic probes small even
+// when somebody explicitly enables it; the CI publisher has its own separate,
+// reviewed worker budget.
+func localImporterCandidateLimit() int {
+	const fallback = 12
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("IMPORTER_MAX_CANDIDATES")))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	if value > 32 {
+		return 32
+	}
+	return value
 }
 
 func signingKey() (*ecdsa.PrivateKey, error) {
