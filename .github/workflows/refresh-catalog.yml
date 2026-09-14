@@ -2,6 +2,15 @@ name: Refresh server catalog
 
 on:
   workflow_dispatch:
+  # Checker changes need a fresh signed snapshot immediately; publishing the
+  # resulting public/catalog.json does not match these paths, so this cannot
+  # trigger a refresh loop.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refresh-catalog.yml'
+      - 'cmd/publish/**'
+      - 'internal/**'
   schedule:
     # Offset from the top of the hour, when scheduled GitHub jobs are often busy.
     - cron: '7,22,37,52 * * * *'
