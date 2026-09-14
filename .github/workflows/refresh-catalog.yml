@@ -11,7 +11,10 @@ permissions:
 
 concurrency:
   group: catalog-refresh
-  cancel-in-progress: false
+  # A delayed scheduled run must never hold up a newer snapshot. The normal
+  # check completes in about a minute; cancelling an old queued run gives the
+  # newest source view priority when GitHub's scheduler catches up late.
+  cancel-in-progress: true
 
 jobs:
   refresh:
@@ -35,11 +38,26 @@ jobs:
           unzip -q xray.zip xray
           chmod 0755 xray
       - name: Check public VLESS candidates and sign catalog
+        shell: bash
         env:
           CATALOG_SIGNING_PRIVATE_KEY: ${{ secrets.CATALOG_SIGNING_PRIVATE_KEY }}
           XRAY_BIN: ${{ github.workspace }}/xray
           CATALOG_OUTPUT: public/catalog.json
-        run: go run ./cmd/publish
+        run: |
+          set -euo pipefail
+          # A transient GitHub, source-feed or probe-endpoint error must not
+          # leave the last snapshot in place until the next scheduled event.
+          # Publishing itself is atomic, so a failed attempt cannot replace
+          # the known-good catalog.
+          for attempt in 1 2 3; do
+            if go run ./cmd/publish; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 20))"
+            fi
+          done
+          exit 1
       - name: Publish only a changed catalog
         run: |
           if test -z "$(git status --porcelain -- public/catalog.json)"; then exit 0; fi

@@ -44,3 +44,13 @@ func TestParseVLESSRejectsNonUUIDIdentity(t *testing.T) {
 		t.Fatal("expected non-UUID VLESS identity to be rejected")
 	}
 }
+
+func TestCountryNameCoversPublishedTraceCodes(t *testing.T) {
+	for code, want := range map[string]string{
+		"HK": "Гонконг", "KR": "Южная Корея", "MD": "Молдова", "TW": "Тайвань",
+	} {
+		if got := CountryName(code); got != want {
+			t.Fatalf("CountryName(%q) = %q, want %q", code, got, want)
+		}
+	}
+}

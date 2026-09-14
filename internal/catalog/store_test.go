@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -55,6 +56,117 @@ func TestStoreDoesNotPromoteHighLatencyOneShotThroughput(t *testing.T) {
 	got := store.Current().Payload.Servers
 	if got[0].ID != "responsive" || got[1].ID != "slower" || got[2].ID != "unusable" {
 		t.Fatalf("catalog should prefer viable latency before one transfer rate: %#v", got)
+	}
+}
+
+func TestStoreTreatsMissingOptionalThroughputAsUnknownNotSlow(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	if err := store.Replace("test", []VLESS{
+		{ID: "youtube-ok", Host: "youtube-ok.example", Port: 443, UUID: "youtube-ok", Security: "tls", SNI: "youtube-ok.example", Type: "tcp", LatencyMs: 130, ThroughputKbps: 0},
+		{ID: "slow-speed", Host: "slow-speed.example", Port: 443, UUID: "slow-speed", Security: "tls", SNI: "slow-speed.example", Type: "tcp", LatencyMs: 100, ThroughputKbps: 900},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Current().Payload.Servers[0].ID; got != "youtube-ok" {
+		t.Fatalf("missing optional speed demoted a YouTube-verified route: %s", got)
+	}
+}
+
+func TestStoreCapsCountrySkewAndRetainsNearbyExits(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	servers := make([]VLESS, 0)
+	appendCountry := func(country string, count int) {
+		for index := 0; index < count; index++ {
+			id := fmt.Sprintf("%s-%02d", country, index)
+			servers = append(servers, VLESS{
+				ID: id, Host: id + ".example", Port: 443, UUID: id,
+				Security: "tls", SNI: id + ".example", Type: "tcp",
+				CountryCode: country, LatencyMs: 100 + index, ThroughputKbps: 10_000,
+			})
+		}
+	}
+	appendCountry("US", 8)
+	appendCountry("NL", 6)
+	for _, country := range []string{"DE", "FI", "EE", "PL", "LV", "LT", "SE"} {
+		appendCountry(country, 1)
+	}
+	appendCountry("JP", 3)
+
+	if err := store.Replace("test", servers); err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	for _, server := range store.Current().Payload.Servers {
+		counts[server.CountryCode]++
+	}
+	for country, count := range counts {
+		if count > maxRoutesPerCountry {
+			t.Fatalf("%s has %d routes, cap is %d", country, count, maxRoutesPerCountry)
+		}
+	}
+	for _, country := range []string{"DE", "FI", "EE", "PL", "LV", "LT", "SE", "NL"} {
+		if counts[country] == 0 {
+			t.Fatalf("nearby country %s was squeezed out: %#v", country, counts)
+		}
+	}
+	if counts["US"] != maxRoutesPerCountry || counts["NL"] != maxRoutesPerCountry {
+		t.Fatalf("country cap was not applied: %#v", counts)
+	}
+}
+
+func TestStoreCountryCapKeepsAllFreshRoutesWhenOnlyOneCountryPasses(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	servers := make([]VLESS, 0, 6)
+	for index := 0; index < 6; index++ {
+		id := fmt.Sprintf("US-%02d", index)
+		servers = append(servers, VLESS{ID: id, Host: id + ".example", UUID: id, Security: "tls", SNI: id + ".example", Type: "tcp", CountryCode: "US", LatencyMs: 100})
+	}
+	if err := store.Replace("test", servers); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Current().Payload.Servers
+	if len(got) != len(servers) {
+		t.Fatalf("got %d routes, want all %d fresh fallback routes", len(got), len(servers))
+	}
+	for _, server := range got {
+		if server.CountryCode != "US" {
+			t.Fatalf("unexpected fallback country: %#v", got)
+		}
+	}
+}
+
+func TestStoreCountryCapLimitsSingleCountryOverflowToUsefulFloor(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	servers := make([]VLESS, 0, 20)
+	for index := 0; index < 20; index++ {
+		id := fmt.Sprintf("US-overflow-%02d", index)
+		servers = append(servers, VLESS{ID: id, Host: id + ".example", UUID: id, Security: "tls", SNI: id + ".example", Type: "tcp", CountryCode: "US", LatencyMs: 100})
+	}
+	if err := store.Replace("test", servers); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(store.Current().Payload.Servers); got != minimumUsefulRoutes {
+		t.Fatalf("got %d routes, want controlled fresh overflow of %d", got, minimumUsefulRoutes)
+	}
+}
+
+func TestStoreDoesNotDropVerifiedRoutesWhenCountryTraceIsUnavailable(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	servers := make([]VLESS, 0, 6)
+	for index := 0; index < 6; index++ {
+		id := fmt.Sprintf("unknown-%02d", index)
+		servers = append(servers, VLESS{ID: id, Host: id + ".example", UUID: id, Security: "tls", SNI: id + ".example", Type: "tcp", LatencyMs: 100})
+	}
+	if err := store.Replace("test", servers); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(store.Current().Payload.Servers); got != len(servers) {
+		t.Fatalf("optional country trace dropped %d of %d verified routes", len(servers)-got, len(servers))
 	}
 }
 

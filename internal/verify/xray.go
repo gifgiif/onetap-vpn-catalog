@@ -23,13 +23,18 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-const probeBytes = 256 << 10
-const defaultProbeURL = "https://speed.cloudflare.com/__down?bytes=262144"
+const (
+	probeBytes             = 256 << 10
+	defaultProbeURL        = "https://speed.cloudflare.com/__down?bytes=262144"
+	defaultYouTubeProbeURL = "https://youtube.com/generate_204"
+	optionalProbeTimeout   = 4 * time.Second
+)
 
 type XrayChecker struct {
-	Binary   string
-	Timeout  time.Duration
-	ProbeURL string
+	Binary          string
+	Timeout         time.Duration
+	ProbeURL        string
+	YouTubeProbeURL string
 }
 
 func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.ProbeMetrics, error) {
@@ -86,37 +91,21 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		return dialer.(proxy.ContextDialer).DialContext(ctx, network, address)
 	}}}
-	probeURL := c.ProbeURL
-	if probeURL == "" {
-		probeURL = defaultProbeURL
+	youtubeURL := c.YouTubeProbeURL
+	if youtubeURL == "" {
+		youtubeURL = defaultYouTubeProbeURL
 	}
-	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, probeURL, nil)
+	// A route is publishable only after an actual YouTube HTTPS request crossed
+	// its VLESS tunnel. TCP, SOCKS startup and a generic CDN download alone do
+	// not prove that the route can serve the application's primary use case.
+	youtubeLatency, err := requireYouTube204(checkCtx, client, youtubeURL)
 	if err != nil {
 		return catalog.ProbeMetrics{}, err
 	}
-	requestedAt := time.Now()
-	response, err := client.Do(request)
-	if err != nil {
-		return catalog.ProbeMetrics{}, fmt.Errorf("HTTPS probe: %w", err)
-	}
-	defer response.Body.Close()
-	responseLatency := time.Since(requestedAt)
-	if response.StatusCode != http.StatusOK {
-		return catalog.ProbeMetrics{}, fmt.Errorf("unexpected HTTPS probe status: %d", response.StatusCode)
-	}
-	bodyStarted := time.Now()
-	bytes, err := io.Copy(io.Discard, io.LimitReader(response.Body, probeBytes))
-	if err != nil {
-		return catalog.ProbeMetrics{}, fmt.Errorf("read HTTPS probe: %w", err)
-	}
-	if bytes < probeBytes {
-		return catalog.ProbeMetrics{}, fmt.Errorf("HTTPS probe returned only %d bytes", bytes)
-	}
-	duration := time.Since(bodyStarted)
-	throughput := int(float64(bytes*8) / duration.Seconds() / 1_000)
-	metrics := catalog.ProbeMetrics{LatencyMs: int(responseLatency.Milliseconds()), ThroughputKbps: throughput}
-	// This optional check uses the same proxy and HTTPS validation. Failure of
-	// geolocation alone must not discard a route that can carry video traffic.
+	metrics := catalog.ProbeMetrics{LatencyMs: int(youtubeLatency.Milliseconds())}
+	// Resolve the exit country while the checker budget is still available.
+	// Country diversity is part of publication, whereas a throughput number is
+	// only a ranking hint and can safely be skipped near the deadline.
 	geoCtx, geoCancel := context.WithTimeout(checkCtx, 1500*time.Millisecond)
 	defer geoCancel()
 	geoRequest, _ := http.NewRequestWithContext(geoCtx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
@@ -127,7 +116,68 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 		}
 		geoResponse.Body.Close()
 	}
+
+	// The Cloudflare transfer is a noisy ranking signal, not a gate. A healthy
+	// YouTube route remains in the catalog when this optional endpoint is slow,
+	// rate-limited, or temporarily unavailable from the checker region.
+	probeURL := c.ProbeURL
+	if probeURL == "" {
+		probeURL = defaultProbeURL
+	}
+	if throughput, ok := optionalThroughput(checkCtx, client, probeURL); ok {
+		metrics.ThroughputKbps = throughput
+	}
 	return metrics, nil
+}
+
+// requireYouTube204 verifies the documented lightweight YouTube endpoint.
+// Keeping it separate from Xray process management makes the publication gate
+// independently testable and prevents a successful unrelated HTTPS request
+// from admitting a route.
+func requireYouTube204(ctx context.Context, client *http.Client, endpoint string) (time.Duration, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create YouTube probe: %w", err)
+	}
+	started := time.Now()
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("YouTube HTTPS probe: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return 0, fmt.Errorf("unexpected YouTube probe status: %d", response.StatusCode)
+	}
+	return time.Since(started), nil
+}
+
+// optionalThroughput returns false rather than an error: it must never evict a
+// route that already passed the mandatory YouTube request.
+func optionalThroughput(ctx context.Context, client *http.Client, endpoint string) (int, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, optionalProbeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, false
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	started := time.Now()
+	bytes, err := io.Copy(io.Discard, io.LimitReader(response.Body, probeBytes))
+	if err != nil || bytes < probeBytes {
+		return 0, false
+	}
+	duration := time.Since(started)
+	if duration <= 0 {
+		return 0, false
+	}
+	return int(float64(bytes*8) / duration.Seconds() / 1_000), true
 }
 
 func traceCountry(body string) string {

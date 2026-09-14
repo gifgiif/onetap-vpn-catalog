@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/onetap-vpn/onetap/backend/internal/catalog"
 )
@@ -105,4 +106,42 @@ func TestRefreshDoesNotPublishAnUnverifiedFeedCountry(t *testing.T) {
 	if got.CountryCode != "" || got.CountryName != "" {
 		t.Fatalf("unverified feed country reached the signed catalog: %#v", got)
 	}
+}
+
+func TestSampleCandidatesUsesDeterministicRapidSlots(t *testing.T) {
+	candidates := make([]catalog.VLESS, 24)
+	for index := range candidates {
+		candidates[index] = catalog.VLESS{ID: fmt.Sprintf("route-%02d", index)}
+	}
+	start := time.Unix(0, 0).UTC()
+	first := sampleCandidatesAt(candidates, 6, start)
+	withinSameSlot := sampleCandidatesAt(candidates, 6, start.Add(candidateSampleSlot-time.Second))
+	if !sameCandidateIDs(first, withinSameSlot) {
+		t.Fatal("same sample slot returned a different candidate set")
+	}
+
+	seen := make(map[string]bool)
+	for slot := 0; slot < 4; slot++ {
+		for _, candidate := range sampleCandidatesAt(candidates, 6, start.Add(time.Duration(slot)*candidateSampleSlot)) {
+			if seen[candidate.ID] {
+				t.Fatalf("candidate %s repeated before the source was covered", candidate.ID)
+			}
+			seen[candidate.ID] = true
+		}
+	}
+	if len(seen) != len(candidates) {
+		t.Fatalf("got %d of %d candidates after four slots", len(seen), len(candidates))
+	}
+}
+
+func sameCandidateIDs(left, right []catalog.VLESS) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ID != right[index].ID {
+			return false
+		}
+	}
+	return true
 }

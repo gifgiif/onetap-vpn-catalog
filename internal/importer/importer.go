@@ -44,6 +44,11 @@ type cachedSource struct {
 	lines          []string
 }
 
+// candidateSampleSlot matches the normal scheduled refresh. Each scheduled
+// run therefore advances to the next deterministic slice rather than skipping
+// through a pattern that can leave part of a large feed untested for longer.
+const candidateSampleSlot = 15 * time.Minute
+
 func New(store MutableStore, sources []Source) *Runner {
 	// Keep a refresh bounded: candidates are Xray processes, not cheap TCP dials.
 	// Six checks are small enough for the pilot host and let the full queue finish
@@ -134,17 +139,55 @@ func (r *Runner) Refresh(ctx context.Context) error {
 // first entries. This keeps a bounded worker from favouring the first country
 // or the first source whenever a subscription is large.
 func sampleCandidates(candidates []catalog.VLESS, limit int) []catalog.VLESS {
+	return sampleCandidatesAt(candidates, limit, time.Now().UTC())
+}
+
+// sampleCandidatesAt is slot-based rather than process-local. GitHub Actions
+// starts a fresh worker on every run, so a counter in memory would reset and
+// repeatedly inspect the same part of a large feed. The stride is coprime with
+// the input length: adjacent slots choose a materially different, still evenly
+// distributed, subset and eventually cover every candidate deterministically.
+func sampleCandidatesAt(candidates []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
 	if limit <= 0 || len(candidates) <= limit {
 		return candidates
 	}
 	selected := make([]catalog.VLESS, 0, limit)
-	step := float64(len(candidates)) / float64(limit)
+	size := len(candidates)
+	slot := now.UTC().Unix() / int64(candidateSampleSlot/time.Second)
+	stride := coprimeRotationStride(size, limit+1)
+	offset := int((slot % int64(size)) * int64(stride) % int64(size))
 	for index := 0; index < limit; index++ {
-		// A new slice each 15-minute slot, including on fresh CI workers.
-		position := (int(float64(index)*step) + int(time.Now().Unix()/900)%len(candidates)) % len(candidates)
+		// The base keeps every one slot spread over the entire source; the
+		// offset changes each refresh slot rather than crawling by one
+		// position per scheduled refresh.
+		position := (index*size/limit + offset) % size
 		selected = append(selected, candidates[position])
 	}
 	return selected
+}
+
+func coprimeRotationStride(size, preferred int) int {
+	if size <= 1 {
+		return 0
+	}
+	stride := preferred % size
+	if stride == 0 {
+		stride = 1
+	}
+	for greatestCommonDivisor(stride, size) != 1 {
+		stride++
+		if stride == size {
+			stride = 1
+		}
+	}
+	return stride
+}
+
+func greatestCommonDivisor(left, right int) int {
+	for right != 0 {
+		left, right = right, left%right
+	}
+	return left
 }
 
 func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalog.VLESS {

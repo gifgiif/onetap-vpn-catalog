@@ -14,6 +14,22 @@ import (
 	"time"
 )
 
+const (
+	maxCatalogServers   = 64
+	maxRoutesPerCountry = 4
+	minimumUsefulRoutes = 12
+)
+
+// nearbyTargetCountries is a retention preference for people connecting from
+// Russia and neighbouring networks. It does not claim that a route will work
+// for every carrier; the device still makes the final local choice.
+var nearbyTargetCountries = []string{
+	"DE", "FI", "EE", "PL", "LV", "LT", "SE", "NL",
+	"CZ", "DK", "NO", "AT", "CH", "FR", "BE", "GB",
+	"RO", "SK", "HU", "SI", "HR", "BG", "IT", "ES",
+	"PT", "GR", "IE", "KZ", "UZ", "AM", "TR",
+}
+
 type Store interface{ Current() SignedCatalog }
 
 type MemoryStore struct {
@@ -87,31 +103,17 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 		}
 		return servers[i].ID < servers[j].ID
 	})
-	// Leave room in the 96-probe CI budget for discovering new routes next run.
-	if len(servers) > 64 {
-		chosen := make(map[string]bool)
-		countries := make(map[string]bool)
-		var pool []VLESS
-		for _, server := range servers {
-			if !countries[server.CountryCode] && len(pool) < 64 {
-				pool = append(pool, server)
-				chosen[server.ID] = true
-				countries[server.CountryCode] = true
-			}
+	// A single public feed can dominate the measurements from a GitHub runner.
+	// Keep several independently verified routes per country, but retain nearby
+	// European exits before farther reserves. Applying this even below 64 rows
+	// prevents a 64-row US-heavy pool from slipping through unchanged.
+	servers = diverseCountryPool(servers, maxCatalogServers, maxRoutesPerCountry)
+	sort.Slice(servers, func(i, j int) bool {
+		if faster(servers[i], servers[j]) != faster(servers[j], servers[i]) {
+			return faster(servers[i], servers[j])
 		}
-		for _, server := range servers {
-			if !chosen[server.ID] && len(pool) < 64 {
-				pool = append(pool, server)
-			}
-		}
-		servers = pool
-		sort.Slice(servers, func(i, j int) bool {
-			if faster(servers[i], servers[j]) != faster(servers[j], servers[i]) {
-				return faster(servers[i], servers[j])
-			}
-			return servers[i].ID < servers[j].ID
-		})
-	}
+		return servers[i].ID < servers[j].ID
+	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Every member of this set passed a fresh probe. Keep even a small set:
@@ -200,13 +202,103 @@ func faster(left, right VLESS) bool {
 	return left.ThroughputKbps > right.ThroughputKbps
 }
 
+// diverseCountryPool takes already quality-sorted candidates and selects in
+// rounds: one route from every preferred nearby country, then one from every
+// remaining country, then their second route, and so on. No country can crowd
+// out the alternatives merely because a remote checker observed it as fast.
+//
+// A non-empty verified candidate set always produces at least one result. If a
+// rare refresh finds fewer than minimumUsefulRoutes after the diversity cap,
+// it fills only to that modest backup floor from other freshly verified routes.
+// This avoids replacing a live pool with four same-country routes while never
+// reviving stale historic nodes or allowing a large one-country catalog.
+func diverseCountryPool(servers []VLESS, limit, maxPerCountry int) []VLESS {
+	if len(servers) == 0 || limit <= 0 || maxPerCountry <= 0 {
+		return nil
+	}
+	byCountry := make(map[string][]VLESS)
+	encountered := make([]string, 0)
+	seenCountries := make(map[string]bool)
+	for _, server := range servers {
+		country := countryBucket(server)
+		if !seenCountries[country] {
+			encountered = append(encountered, country)
+			seenCountries[country] = true
+		}
+		byCountry[country] = append(byCountry[country], server)
+	}
+
+	orderedCountries := make([]string, 0, len(encountered))
+	added := make(map[string]bool)
+	for _, country := range nearbyTargetCountries {
+		if len(byCountry[country]) > 0 {
+			orderedCountries = append(orderedCountries, country)
+			added[country] = true
+		}
+	}
+	for _, country := range encountered {
+		if !added[country] {
+			orderedCountries = append(orderedCountries, country)
+			added[country] = true
+		}
+	}
+
+	selected := make([]VLESS, 0, min(limit, len(servers)))
+	for rank := 0; rank < maxPerCountry && len(selected) < limit; rank++ {
+		for _, country := range orderedCountries {
+			if options := byCountry[country]; rank < len(options) {
+				selected = append(selected, options[rank])
+				if len(selected) == limit {
+					break
+				}
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return []VLESS{servers[0]}
+	}
+	usefulFloor := min(limit, min(minimumUsefulRoutes, len(servers)))
+	if len(selected) < usefulFloor {
+		chosen := make(map[string]bool, len(selected))
+		for _, server := range selected {
+			chosen[candidateKey(server)] = true
+		}
+		for _, server := range servers {
+			key := candidateKey(server)
+			if chosen[key] {
+				continue
+			}
+			selected = append(selected, server)
+			chosen[key] = true
+			if len(selected) == usefulFloor {
+				break
+			}
+		}
+	}
+	return selected
+}
+
+func countryBucket(server VLESS) string {
+	code := strings.ToUpper(strings.TrimSpace(server.CountryCode))
+	if len(code) == 2 {
+		return code
+	}
+	// A trace failure must not make all otherwise YouTube-verified routes look
+	// like one country and drop all but four of them. It gets an individual
+	// fallback bucket until a later successful check can identify the exit.
+	return "__UNKNOWN__:" + server.ID
+}
+
 // A single 256 KiB transfer is noisy. It must never promote a multi-second
 // route above a usable low-latency one. Throughput breaks ties after latency.
 func qualityBand(server VLESS) int {
 	if server.LatencyMs <= 0 {
 		return 2
 	}
-	if server.LatencyMs > 1500 || server.ThroughputKbps < 1500 {
+	// Throughput is optional because the mandatory YouTube request is the
+	// publication gate. Zero means the optional speed endpoint was unavailable,
+	// not that the VLESS route is slow.
+	if server.LatencyMs > 1500 || (server.ThroughputKbps > 0 && server.ThroughputKbps < 1500) {
 		return 1
 	}
 	return 0
