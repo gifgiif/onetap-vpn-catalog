@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,50 @@ func TestSampleCandidatesUsesDeterministicRapidSlots(t *testing.T) {
 	}
 	if len(seen) != len(candidates) {
 		t.Fatalf("got %d of %d candidates after four slots", len(seen), len(candidates))
+	}
+}
+
+func TestRefreshSelectionIsBoundedDistinctAndRotates(t *testing.T) {
+	existing := make([]catalog.VLESS, 40)
+	incoming := make([]catalog.VLESS, 40)
+	for index := range existing {
+		existing[index] = catalog.VLESS{ID: fmt.Sprintf("existing-%02d", index), Host: fmt.Sprintf("existing-%02d", index)}
+		incoming[index] = catalog.VLESS{ID: fmt.Sprintf("incoming-%02d", index), Host: fmt.Sprintf("incoming-%02d", index)}
+	}
+	start := time.Unix(0, 0).UTC()
+	first := selectRefreshCandidates(existing, incoming, scheduledCandidateLimit, start)
+	second := selectRefreshCandidates(existing, incoming, scheduledCandidateLimit, start.Add(candidateSampleSlot))
+	if len(first) != scheduledCandidateLimit || len(second) != scheduledCandidateLimit {
+		t.Fatalf("selection was not bounded to %d: %d, %d", scheduledCandidateLimit, len(first), len(second))
+	}
+	for _, selection := range [][]catalog.VLESS{first, second} {
+		seen := map[string]bool{}
+		for _, server := range selection {
+			if seen[catalog.RouteKey(server)] {
+				t.Fatalf("duplicate route selected: %#v", server)
+			}
+			seen[catalog.RouteKey(server)] = true
+		}
+	}
+	if sameCandidateIDs(first, second) {
+		t.Fatal("two scheduled slots selected the same routes")
+	}
+}
+
+func TestSubscriptionLinesDecodesBase64VLESSFeed(t *testing.T) {
+	uri := "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&security=tls&type=tcp"
+	encoded := base64.RawStdEncoding.EncodeToString([]byte(uri + "\n"))
+	lines := subscriptionLines([]byte(encoded))
+	if len(lines) != 1 || lines[0] != uri {
+		t.Fatalf("unexpected decoded lines: %#v", lines)
+	}
+}
+
+func TestSubscriptionLinesKeepsPlainFeed(t *testing.T) {
+	uri := "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&security=tls&type=tcp"
+	lines := subscriptionLines([]byte("# comment\n" + uri + "\n"))
+	if len(lines) != 3 || lines[2] != uri {
+		t.Fatalf("unexpected plain lines: %#v", lines)
 	}
 }
 

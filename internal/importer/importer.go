@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,8 +14,9 @@ import (
 )
 
 type Source struct {
-	Name string
-	URL  string
+	Name     string
+	URL      string
+	MaxBytes int64
 }
 
 type MutableStore interface {
@@ -47,13 +49,21 @@ type cachedSource struct {
 // candidateSampleSlot matches the normal scheduled refresh. Each scheduled
 // run therefore advances to the next deterministic slice rather than skipping
 // through a pattern that can leave part of a large feed untested for longer.
-const candidateSampleSlot = 15 * time.Minute
+const (
+	candidateSampleSlot = 15 * time.Minute
+	// Free feeds can suddenly grow to many megabytes. The checker needs a
+	// rotating shortlist, not an unbounded mirror of every upstream database.
+	defaultSourceMaxBytes   = 1 << 20
+	maxSourceLines          = 6000
+	scheduledCandidateLimit = 48
+	retainedCandidateSlots  = 36
+)
 
 func New(store MutableStore, sources []Source) *Runner {
 	// Keep a refresh bounded: candidates are Xray processes, not cheap TCP dials.
 	// Six checks are small enough for the pilot host and let the full queue finish
 	// well inside the fifteen-minute refresh window.
-	return &Runner{client: &http.Client{Timeout: 20 * time.Second}, store: store, sources: sources, cache: map[string]cachedSource{}, parallelism: 6}
+	return &Runner{client: &http.Client{Timeout: 12 * time.Second}, store: store, sources: sources, cache: map[string]cachedSource{}, parallelism: 6}
 }
 
 func (r *Runner) WithChecker(checker Checker) *Runner { r.checker = checker; return r }
@@ -64,6 +74,10 @@ func (r *Runner) WithMaxCandidates(limit int) *Runner {
 	r.maxCandidates = limit
 	return r
 }
+
+// ScheduledCandidateLimit is deliberately small enough that one CI run cannot
+// turn a public feed update into a burst of long-lived Xray processes.
+func ScheduledCandidateLimit() int { return scheduledCandidateLimit }
 
 func (r *Runner) Refresh(ctx context.Context) error {
 	r.mu.Lock()
@@ -97,7 +111,6 @@ func (r *Runner) Refresh(ctx context.Context) error {
 			}
 		}
 	}
-	priorCount := len(candidates)
 	seen := make(map[string]bool)
 	for _, server := range candidates {
 		seen[catalog.RouteKey(server)] = true
@@ -116,13 +129,7 @@ func (r *Runner) Refresh(ctx context.Context) error {
 		return fmt.Errorf("upstream update had no valid VLESS configurations")
 	}
 	if r.maxCandidates > 0 {
-		if priorCount > r.maxCandidates {
-			candidates = candidates[:r.maxCandidates]
-		}
-		budget := r.maxCandidates - len(candidates)
-		if budget > 0 {
-			candidates = append(candidates, sampleCandidates(incoming, budget)...)
-		}
+		candidates = selectRefreshCandidates(candidates, incoming, r.maxCandidates, time.Now().UTC())
 	} else {
 		candidates = append(candidates, incoming...)
 	}
@@ -140,6 +147,45 @@ func (r *Runner) Refresh(ctx context.Context) error {
 // or the first source whenever a subscription is large.
 func sampleCandidates(candidates []catalog.VLESS, limit int) []catalog.VLESS {
 	return sampleCandidatesAt(candidates, limit, time.Now().UTC())
+}
+
+// selectRefreshCandidates keeps most slots for the current signed pool while
+// rotating both it and new upstream candidates on every quarter-hour slot.
+// This prevents a huge feed from crowding out proven routes and prevents the
+// first page of either group from being retried forever.
+func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
+	if limit <= 0 {
+		return nil
+	}
+	retain := min(limit, retainedCandidateSlots)
+	selected := sampleCandidatesAt(existing, retain, now)
+	if len(selected) < retain {
+		selected = append(selected, sampleWithoutRoutes(incoming, selected, retain-len(selected), now)...)
+	}
+	if len(selected) < limit {
+		selected = append(selected, sampleWithoutRoutes(incoming, selected, limit-len(selected), now)...)
+	}
+	if len(selected) < limit {
+		selected = append(selected, sampleWithoutRoutes(existing, selected, limit-len(selected), now)...)
+	}
+	return selected
+}
+
+func sampleWithoutRoutes(candidates, excluded []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
+	if limit <= 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(excluded))
+	for _, server := range excluded {
+		seen[catalog.RouteKey(server)] = true
+	}
+	remaining := make([]catalog.VLESS, 0, len(candidates))
+	for _, server := range candidates {
+		if !seen[catalog.RouteKey(server)] {
+			remaining = append(remaining, server)
+		}
+	}
+	return sampleCandidatesAt(remaining, limit, now)
 }
 
 // sampleCandidatesAt is slot-based rather than process-local. GitHub Actions
@@ -208,7 +254,10 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 				return
 			}
 			defer func() { <-semaphore }()
-			probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			// This bounds DNS validation, Xray startup and the YouTube gate as one
+			// unit. A dead node must release its worker quickly instead of making
+			// later candidates wait behind a long network timeout.
+			probeCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
 			defer cancel()
 			if err := catalog.ValidateResolvedPublicHost(probeCtx, server.Host); err != nil {
 				return
@@ -271,13 +320,50 @@ func (r *Runner) fetch(ctx context.Context, source Source) ([]string, bool, erro
 	if response.StatusCode != http.StatusOK {
 		return nil, false, fmt.Errorf("%s returned %d", source.Name, response.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	limit := source.MaxBytes
+	if limit <= 0 {
+		limit = defaultSourceMaxBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, false, err
 	}
-	lines := strings.Fields(string(body))
+	if int64(len(body)) > limit {
+		return nil, false, fmt.Errorf("%s exceeded %d byte input limit", source.Name, limit)
+	}
+	lines := subscriptionLines(body)
+	if len(lines) > maxSourceLines {
+		lines = lines[:maxSourceLines]
+	}
 	r.cache[source.URL] = cachedSource{etag: response.Header.Get("ETag"), modified: response.Header.Get("Last-Modified"), lines: lines}
 	return lines, true, nil
+}
+
+// Some VLESS publishers serve one URI per line while others serve the whole
+// subscription as standard or URL-safe Base64. Decode only a complete feed,
+// never individual URI fragments, and return plain fields for the restrictive
+// parser that follows.
+func subscriptionLines(body []byte) []string {
+	plain := strings.Fields(string(body))
+	for _, line := range plain {
+		if strings.HasPrefix(strings.ToLower(line), "vless://") {
+			return plain
+		}
+	}
+	compact := strings.Join(plain, "")
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		decoded, err := encoding.DecodeString(compact)
+		if err != nil {
+			continue
+		}
+		lines := strings.Fields(string(decoded))
+		for _, line := range lines {
+			if strings.HasPrefix(strings.ToLower(line), "vless://") {
+				return lines
+			}
+		}
+	}
+	return plain
 }
 
 func DefaultSources() []Source {
@@ -294,5 +380,12 @@ func DefaultSources() []Source {
 		// TLS/REALITY-only VLESS output; unsupported transports and options are
 		// rejected by ParseVLESS before any connection attempt.
 		{Name: "vovaplus-secure-vless", URL: "https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt"},
+		// This source checks only TCP itself, so it is never trusted directly.
+		// Its candidates still go through our strict parser and YouTube gate.
+		{Name: "aviamastersgh-verified", URL: "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt"},
+		// v2go publishes its protocol-specific VLESS feed as Base64 and validates
+		// routes through embedded Xray before publishing. We decode it locally and
+		// repeat our independent YouTube check.
+		{Name: "v2go-vless", URL: "https://raw.githubusercontent.com/Danialsamadi/v2go/main/Splitted-By-Protocol/vless.txt"},
 	}
 }

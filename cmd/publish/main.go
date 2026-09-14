@@ -30,8 +30,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 	runner := importer.New(store, importer.DefaultSources()).
-		WithMaxCandidates(96).
-		WithChecker(verify.XrayChecker{Binary: xrayBinary, Timeout: 12 * time.Second})
+		WithMaxCandidates(importer.ScheduledCandidateLimit()).
+		WithChecker(verify.XrayChecker{Binary: xrayBinary, Timeout: 8 * time.Second})
 	if err := runner.Refresh(ctx); err != nil {
 		// A failed refresh must never erase a signed catalog that clients can
 		// still use. The next scheduled worker tries again.

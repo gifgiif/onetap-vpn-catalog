@@ -56,6 +56,12 @@ func TestOptionalThroughputDoesNotActAsPublicationGate(t *testing.T) {
 	}
 }
 
+func TestThroughputMeasurementIsOptIn(t *testing.T) {
+	if (XrayChecker{}).EnableThroughput {
+		t.Fatal("a scheduled health probe must not download a speed sample by default")
+	}
+}
+
 func TestCountryOnlyComesFromExactTraceField(t *testing.T) {
 	for input, want := range map[string]string{"loc=DE\n": "DE", "ip=1.1.1.1\nloc=NL\ntls=TLSv1.3": "NL", "location=DE": "", "loc=XX": "", "loc=<script>": ""} {
 		if got := traceCountry(input); got != want {

@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	probeBytes             = 256 << 10
-	defaultProbeURL        = "https://speed.cloudflare.com/__down?bytes=262144"
+	probeBytes      = 256 << 10
+	defaultProbeURL = "https://speed.cloudflare.com/__down?bytes=262144"
 	// Keep this exactly aligned with Android and desktop. A worker-side probe
 	// must traverse the same YouTube host that clients use for their final
 	// activation gate.
@@ -38,6 +38,10 @@ type XrayChecker struct {
 	Timeout         time.Duration
 	ProbeURL        string
 	YouTubeProbeURL string
+	// Throughput is intentionally opt-in. A speed sample requires a payload
+	// download and is not needed to decide whether YouTube works; keeping it
+	// off makes the scheduled verifier a low-bandwidth health gate.
+	EnableThroughput bool
 }
 
 func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.ProbeMetrics, error) {
@@ -127,8 +131,10 @@ func (c XrayChecker) Probe(ctx context.Context, server catalog.VLESS) (catalog.P
 	if probeURL == "" {
 		probeURL = defaultProbeURL
 	}
-	if throughput, ok := optionalThroughput(checkCtx, client, probeURL); ok {
-		metrics.ThroughputKbps = throughput
+	if c.EnableThroughput {
+		if throughput, ok := optionalThroughput(checkCtx, client, probeURL); ok {
+			metrics.ThroughputKbps = throughput
+		}
 	}
 	return metrics, nil
 }
