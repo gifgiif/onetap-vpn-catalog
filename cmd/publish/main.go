@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ func main() {
 		WithMaxCandidates(importer.ScheduledCandidateLimit()).
 		WithChecker(verify.XrayChecker{Binary: xrayBinary, Timeout: 8 * time.Second})
 	if err := runner.Refresh(ctx); err != nil {
+		logRefreshReport(runner.Report())
 		// A failed refresh must never erase a signed catalog that clients can
 		// still use. The next scheduled worker tries again.
 		current := store.Current().Payload
@@ -46,8 +48,18 @@ func main() {
 		}
 		log.Fatalf("no usable catalog: %v", err)
 	}
+	logRefreshReport(runner.Report())
 	current := store.Current().Payload
 	log.Printf("published revision %d with %d checked servers to %s", current.Revision, len(current.Servers), filepath.Clean(output))
+}
+
+func logRefreshReport(report importer.RefreshReport) {
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		log.Printf("catalog_refresh_report=marshal_failed")
+		return
+	}
+	log.Printf("catalog_refresh_report=%s", encoded)
 }
 
 func signingKey() *ecdsa.PrivateKey {

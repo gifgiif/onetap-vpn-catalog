@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,28 @@ func TestRefreshPublishesProbeMetrics(t *testing.T) {
 	got := store.Current().Payload.Servers[0]
 	if got.LatencyMs != 120 || got.ThroughputKbps != 8_000 {
 		t.Fatalf("probe metrics were lost: %#v", got)
+	}
+}
+
+func TestRefreshReportContainsOnlyAggregateOperationalData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
+	}))
+	defer server.Close()
+	key, _ := catalog.GenerateSigningKey()
+	runner := New(catalog.NewMemoryStore(key), []Source{{Name: "test-feed", URL: server.URL}}).WithChecker(successfulChecker{})
+	if err := runner.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	report := runner.Report()
+	if report.Outcome != "published" || report.SourceLines != 1 || report.ParsedCandidates != 1 || report.ProbeAccepted != 1 || report.PublishedServers != 1 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	encoded := fmt.Sprintf("%#v", report)
+	for _, forbidden := range []string{server.URL, "1.1.1.1", "11111111-1111-4111-8111-111111111111"} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("report leaked sensitive route data: %s", forbidden)
+		}
 	}
 }
 

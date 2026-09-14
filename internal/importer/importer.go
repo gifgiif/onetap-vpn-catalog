@@ -40,10 +40,45 @@ type Runner struct {
 	checker       Checker
 	parallelism   int
 	maxCandidates int
+	lastReport    RefreshReport
 }
 type cachedSource struct {
 	etag, modified string
 	lines          []string
+}
+
+// RefreshReport is the safe, aggregate operational record printed by the
+// scheduled checker. It intentionally contains no URI, host, UUID, public
+// key, source URL, user data, or per-node failure detail.
+type RefreshReport struct {
+	StartedAt                 time.Time      `json:"startedAt"`
+	FinishedAt                time.Time      `json:"finishedAt"`
+	DurationMs                int64          `json:"durationMs"`
+	Outcome                   string         `json:"outcome"`
+	Sources                   []SourceReport `json:"sources"`
+	ExistingCandidates        int            `json:"existingCandidates"`
+	SourceLines               int            `json:"sourceLines"`
+	ParsedCandidates          int            `json:"parsedCandidates"`
+	RejectedLines             int            `json:"rejectedLines"`
+	DuplicateCandidates       int            `json:"duplicateCandidates"`
+	SelectedCandidates        int            `json:"selectedCandidates"`
+	ProbeAccepted             int            `json:"probeAccepted"`
+	ProbeRejectedDestination  int            `json:"probeRejectedDestination"`
+	ProbeRejectedConnectivity int            `json:"probeRejectedConnectivity"`
+	PublishedServers          int            `json:"publishedServers"`
+}
+
+type SourceReport struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Lines   int    `json:"lines"`
+	Updated bool   `json:"updated"`
+}
+
+type probeReport struct {
+	accepted             int
+	rejectedDestination  int
+	rejectedConnectivity int
 }
 
 // candidateSampleSlot matches the normal scheduled refresh. Each scheduled
@@ -79,26 +114,43 @@ func (r *Runner) WithMaxCandidates(limit int) *Runner {
 // turn a public feed update into a burst of long-lived Xray processes.
 func ScheduledCandidateLimit() int { return scheduledCandidateLimit }
 
-func (r *Runner) Refresh(ctx context.Context) error {
+func (r *Runner) Refresh(ctx context.Context) (err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	report := RefreshReport{StartedAt: time.Now().UTC(), Outcome: "failed", Sources: make([]SourceReport, 0, len(r.sources))}
+	defer func() {
+		report.FinishedAt = time.Now().UTC()
+		report.DurationMs = report.FinishedAt.Sub(report.StartedAt).Milliseconds()
+		if err != nil {
+			report.Outcome = "failed"
+		}
+		r.lastReport = report
+	}()
 	var all []string
 	var changed bool
 	for _, source := range r.sources {
 		lines, updated, err := r.fetch(ctx, source)
 		if err != nil {
 			all = append(all, r.cache[source.URL].lines...)
+			report.Sources = append(report.Sources, SourceReport{Name: source.Name, Status: "unavailable", Lines: len(r.cache[source.URL].lines)})
 			continue
 		}
 		if updated {
 			changed = true
 		}
 		all = append(all, lines...)
+		status := "cached"
+		if updated {
+			status = "updated"
+		}
+		report.Sources = append(report.Sources, SourceReport{Name: source.Name, Status: status, Lines: len(lines), Updated: updated})
 	}
+	report.SourceLines = len(all)
 	// With a checker installed, a 304 means the source list did not change, not
 	// that its servers are still alive. Re-probe the cached candidates before
 	// extending the signed catalog.
 	if !changed && r.checker == nil {
+		report.Outcome = "unchanged"
 		return nil
 	}
 	candidates := make([]catalog.VLESS, 0, len(all))
@@ -111,6 +163,7 @@ func (r *Runner) Refresh(ctx context.Context) error {
 			}
 		}
 	}
+	report.ExistingCandidates = len(candidates)
 	seen := make(map[string]bool)
 	for _, server := range candidates {
 		seen[catalog.RouteKey(server)] = true
@@ -122,9 +175,14 @@ func (r *Runner) Refresh(ctx context.Context) error {
 			if !seen[key] {
 				incoming = append(incoming, server)
 				seen[key] = true
+			} else {
+				report.DuplicateCandidates++
 			}
+		} else {
+			report.RejectedLines++
 		}
 	}
+	report.ParsedCandidates = len(incoming)
 	if len(candidates)+len(incoming) == 0 {
 		return fmt.Errorf("upstream update had no valid VLESS configurations")
 	}
@@ -133,13 +191,36 @@ func (r *Runner) Refresh(ctx context.Context) error {
 	} else {
 		candidates = append(candidates, incoming...)
 	}
+	report.SelectedCandidates = len(candidates)
 	if r.checker != nil {
-		candidates = r.check(ctx, candidates)
+		var checked probeReport
+		candidates, checked = r.check(ctx, candidates)
+		report.ProbeAccepted = checked.accepted
+		report.ProbeRejectedDestination = checked.rejectedDestination
+		report.ProbeRejectedConnectivity = checked.rejectedConnectivity
 	}
 	if len(candidates) == 0 {
 		return fmt.Errorf("no VLESS configurations passed the HTTPS probe")
 	}
-	return r.store.Replace("public-vless-feeds", candidates)
+	if err := r.store.Replace("public-vless-feeds", candidates); err != nil {
+		return err
+	}
+	report.PublishedServers = len(candidates)
+	if stored, ok := r.store.(interface{ Current() catalog.SignedCatalog }); ok {
+		report.PublishedServers = len(stored.Current().Payload.Servers)
+	}
+	report.Outcome = "published"
+	return nil
+}
+
+// Report returns a snapshot of the last refresh. Its counters are safe to
+// print in public CI logs and are deliberately not a diagnostics transport.
+func (r *Runner) Report() RefreshReport {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	report := r.lastReport
+	report.Sources = append([]SourceReport(nil), report.Sources...)
+	return report
 }
 
 // sampleCandidates walks the complete upstream list instead of only taking its
@@ -236,13 +317,17 @@ func greatestCommonDivisor(left, right int) int {
 	return left
 }
 
-func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalog.VLESS {
+func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catalog.VLESS, probeReport) {
 	limit := r.parallelism
 	if limit < 1 {
 		limit = 1
 	}
 	semaphore := make(chan struct{}, limit)
-	results := make(chan catalog.VLESS, len(candidates))
+	type probeResult struct {
+		server  catalog.VLESS
+		outcome string
+	}
+	results := make(chan probeResult, len(candidates))
 	var group sync.WaitGroup
 	for _, server := range candidates {
 		group.Add(1)
@@ -251,6 +336,7 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 			select {
 			case semaphore <- struct{}{}:
 			case <-ctx.Done():
+				results <- probeResult{outcome: "connectivity"}
 				return
 			}
 			defer func() { <-semaphore }()
@@ -260,6 +346,7 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 			probeCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
 			defer cancel()
 			if err := catalog.ValidateResolvedPublicHost(probeCtx, server.Host); err != nil {
+				results <- probeResult{outcome: "destination"}
 				return
 			}
 			if metrics, err := r.checker.Probe(probeCtx, server); err == nil {
@@ -275,17 +362,28 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) []catalo
 					server.CountryCode = metrics.CountryCode
 					server.CountryName = catalog.CountryName(metrics.CountryCode)
 				}
-				results <- server
+				results <- probeResult{server: server, outcome: "accepted"}
+			} else {
+				results <- probeResult{outcome: "connectivity"}
 			}
 		}(server)
 	}
 	group.Wait()
 	close(results)
 	accepted := make([]catalog.VLESS, 0, len(candidates))
-	for server := range results {
-		accepted = append(accepted, server)
+	report := probeReport{}
+	for result := range results {
+		switch result.outcome {
+		case "accepted":
+			accepted = append(accepted, result.server)
+			report.accepted++
+		case "destination":
+			report.rejectedDestination++
+		default:
+			report.rejectedConnectivity++
+		}
 	}
-	return accepted
+	return accepted, report
 }
 func (r *Runner) Run(ctx context.Context, interval time.Duration) {
 	_ = r.Refresh(ctx)
