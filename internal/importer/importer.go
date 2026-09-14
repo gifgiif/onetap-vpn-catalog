@@ -63,6 +63,7 @@ type RefreshReport struct {
 	DuplicateCandidates       int            `json:"duplicateCandidates"`
 	SelectedCandidates        int            `json:"selectedCandidates"`
 	ProbeAccepted             int            `json:"probeAccepted"`
+	ProbeExcludedCountry      int            `json:"probeExcludedCountry"`
 	ProbeRejectedDestination  int            `json:"probeRejectedDestination"`
 	ProbeRejectedConnectivity int            `json:"probeRejectedConnectivity"`
 	PublishedServers          int            `json:"publishedServers"`
@@ -77,6 +78,7 @@ type SourceReport struct {
 
 type probeReport struct {
 	accepted             int
+	excludedCountry      int
 	rejectedDestination  int
 	rejectedConnectivity int
 }
@@ -196,6 +198,7 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 		var checked probeReport
 		candidates, checked = r.check(ctx, candidates)
 		report.ProbeAccepted = checked.accepted
+		report.ProbeExcludedCountry = checked.excludedCountry
 		report.ProbeRejectedDestination = checked.rejectedDestination
 		report.ProbeRejectedConnectivity = checked.rejectedConnectivity
 	}
@@ -350,6 +353,13 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catal
 				return
 			}
 			if metrics, err := r.checker.Probe(probeCtx, server); err == nil {
+				if !catalog.PublishCountryAllowed(metrics.CountryCode) {
+					// Do not expose exits that are intentionally unavailable for
+					// manual selection. This happens after the trace check so an
+					// untrusted feed label cannot suppress a route by itself.
+					results <- probeResult{outcome: "excluded"}
+					return
+				}
 				server.LatencyMs = metrics.LatencyMs
 				server.ThroughputKbps = metrics.ThroughputKbps
 				// A feed label is untrusted display metadata. Publish a country
@@ -379,6 +389,10 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catal
 			report.accepted++
 		case "destination":
 			report.rejectedDestination++
+		case "excluded":
+			// This route successfully passed the network check, but its verified
+			// exit country is intentionally not part of the published pool.
+			report.excludedCountry++
 		default:
 			report.rejectedConnectivity++
 		}

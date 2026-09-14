@@ -54,3 +54,16 @@ func TestCountryNameCoversPublishedTraceCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishCountryAllowedExcludesSingaporeAndIndia(t *testing.T) {
+	for _, code := range []string{"SG", "IN", "sg", "in"} {
+		if PublishCountryAllowed(code) {
+			t.Fatalf("%q must not be published", code)
+		}
+	}
+	for _, code := range []string{"DE", "FI", ""} {
+		if !PublishCountryAllowed(code) {
+			t.Fatalf("%q should remain publishable", code)
+		}
+	}
+}

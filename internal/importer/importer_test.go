@@ -30,6 +30,12 @@ func (c *selectiveChecker) Probe(_ context.Context, server catalog.VLESS) (catal
 	return catalog.ProbeMetrics{LatencyMs: 100, ThroughputKbps: 4000, CountryCode: "DE"}, nil
 }
 
+type countryChecker struct{ code string }
+
+func (c countryChecker) Probe(context.Context, catalog.VLESS) (catalog.ProbeMetrics, error) {
+	return catalog.ProbeMetrics{LatencyMs: 100, ThroughputKbps: 4_000, CountryCode: c.code}, nil
+}
+
 func TestRefreshRechecksExistingPoolWhenFeedsAreUnavailable(t *testing.T) {
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
 	defer source.Close()
@@ -129,6 +135,25 @@ func TestRefreshDoesNotPublishAnUnverifiedFeedCountry(t *testing.T) {
 	got := store.Current().Payload.Servers[0]
 	if got.CountryCode != "" || got.CountryName != "" {
 		t.Fatalf("unverified feed country reached the signed catalog: %#v", got)
+	}
+}
+
+func TestRefreshDoesNotPublishExcludedVerifiedCountries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
+	}))
+	defer server.Close()
+	for _, code := range []string{"SG", "IN"} {
+		key, _ := catalog.GenerateSigningKey()
+		store := catalog.NewMemoryStore(key)
+		runner := New(store, []Source{{Name: "test", URL: server.URL}}).WithChecker(countryChecker{code: code})
+		if err := runner.Refresh(context.Background()); err == nil {
+			t.Fatalf("%s-only candidate should not produce a catalog", code)
+		}
+		report := runner.Report()
+		if report.ProbeExcludedCountry != 1 || report.PublishedServers != 0 {
+			t.Fatalf("unexpected exclusion report for %s: %#v", code, report)
+		}
 	}
 }
 

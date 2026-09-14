@@ -78,6 +78,20 @@ func CountryName(code string) string {
 	return code
 }
 
+// PublishCountryAllowed is a product-level list of exits that are available
+// for manual selection. The check is deliberately applied after the HTTPS
+// trace determines the actual exit country, rather than trusting an upstream
+// URI label. Singapore and India are excluded from the public catalog because
+// they are not useful destinations for this product's current audience.
+func PublishCountryAllowed(code string) bool {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "SG", "IN":
+		return false
+	default:
+		return true
+	}
+}
+
 // Country labels are advisory metadata. We only publish a country when an
 // upstream label identifies it; unknown locations remain "AUTO" rather than
 // pretending an address belongs to a country.
