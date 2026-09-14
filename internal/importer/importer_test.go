@@ -16,7 +16,7 @@ import (
 type successfulChecker struct{}
 
 func (successfulChecker) Probe(context.Context, catalog.VLESS) (catalog.ProbeMetrics, error) {
-	return catalog.ProbeMetrics{LatencyMs: 120, ThroughputKbps: 8_000}, nil
+	return catalog.ProbeMetrics{LatencyMs: 120, ThroughputKbps: 8_000, CountryCode: "DE"}, nil
 }
 
 type selectiveChecker struct{ calls map[string]int }
@@ -121,7 +121,7 @@ func TestRefreshReportContainsOnlyAggregateOperationalData(t *testing.T) {
 	}
 }
 
-func TestRefreshDoesNotPublishAnUnverifiedFeedCountry(t *testing.T) {
+func TestRefreshUsesVerifiedCountryInsteadOfFeedCountry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp#%F0%9F%87%A9%F0%9F%87%AA"))
 	}))
@@ -133,8 +133,8 @@ func TestRefreshDoesNotPublishAnUnverifiedFeedCountry(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := store.Current().Payload.Servers[0]
-	if got.CountryCode != "" || got.CountryName != "" {
-		t.Fatalf("unverified feed country reached the signed catalog: %#v", got)
+	if got.CountryCode != "DE" || got.CountryName != "Германия" {
+		t.Fatalf("verified country did not replace the untrusted feed label: %#v", got)
 	}
 }
 

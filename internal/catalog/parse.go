@@ -78,18 +78,25 @@ func CountryName(code string) string {
 	return code
 }
 
-// PublishCountryAllowed is a product-level list of exits that are available
-// for manual selection. The check is deliberately applied after the HTTPS
-// trace determines the actual exit country, rather than trusting an upstream
-// URI label. Singapore and India are excluded from the public catalog because
-// they are not useful destinations for this product's current audience.
+// PublishCountryAllowed is the explicit list of exit locations available in
+// the product. A newly observed or unidentified country is not published by
+// default. The check is deliberately applied after the HTTPS trace determines
+// the actual exit country, rather than trusting an upstream URI label.
+//
+// This is a practical quality and product filter, not a security guarantee:
+// a server operator can be untrustworthy in any country. It prevents unknown
+// and unreviewed locations from silently appearing in the manual list.
 func PublishCountryAllowed(code string) bool {
-	switch strings.ToUpper(strings.TrimSpace(code)) {
-	case "SG", "IN":
-		return false
-	default:
-		return true
-	}
+	_, allowed := map[string]struct{}{
+		// Nearby and established European exits.
+		"AT": {}, "BE": {}, "CH": {}, "CZ": {}, "DE": {}, "DK": {},
+		"EE": {}, "ES": {}, "FI": {}, "FR": {}, "GB": {}, "IE": {},
+		"IT": {}, "LT": {}, "LV": {}, "NL": {}, "NO": {}, "PL": {},
+		"SE": {},
+		// Distant fallbacks with an established public-server ecosystem.
+		"CA": {}, "HK": {}, "JP": {}, "KR": {}, "TW": {}, "US": {},
+	}[strings.ToUpper(strings.TrimSpace(code))]
+	return allowed
 }
 
 // Country labels are advisory metadata. We only publish a country when an
