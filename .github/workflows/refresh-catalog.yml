@@ -28,7 +28,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-24.04
-    timeout-minutes: 14
+    timeout-minutes: 8
     steps:
       # Pinned to immutable upstream commits; tags alone can move.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -58,11 +58,11 @@ jobs:
           # leave the last snapshot in place until the next scheduled event.
           # Publishing itself is atomic, so a failed attempt cannot replace
           # the known-good catalog.
-          for attempt in 1 2 3; do
+          for attempt in 1 2; do
             if go run ./cmd/publish; then
               exit 0
             fi
-            if [ "$attempt" -lt 3 ]; then
+            if [ "$attempt" -lt 2 ]; then
               sleep "$((attempt * 20))"
             fi
           done

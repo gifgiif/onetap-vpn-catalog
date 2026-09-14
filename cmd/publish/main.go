@@ -27,7 +27,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("read saved catalog: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	// Source downloads are capped and 48 checks run at six-way parallelism.
+	// Three minutes includes the worst intended refresh while making a broken
+	// external feed fail fast enough for the next scheduled slot to take over.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	runner := importer.New(store, importer.DefaultSources()).
 		WithMaxCandidates(importer.ScheduledCandidateLimit()).
