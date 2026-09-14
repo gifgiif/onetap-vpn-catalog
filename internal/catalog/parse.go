@@ -79,22 +79,27 @@ func CountryName(code string) string {
 }
 
 // PublishCountryAllowed is the explicit list of exit locations available in
-// the product. A newly observed or unidentified country is not published by
-// default. The check is deliberately applied after the HTTPS trace determines
-// the actual exit country, rather than trusting an upstream URI label.
+// the product. It prioritizes nearby European and regional exits, retaining
+// the US and Canada only as distant fallbacks. A newly observed or
+// unidentified country is not published by default. The check is deliberately
+// applied after the HTTPS trace determines the actual exit country, rather
+// than trusting an upstream URI label.
 //
 // This is a practical quality and product filter, not a security guarantee:
 // a server operator can be untrustworthy in any country. It prevents unknown
 // and unreviewed locations from silently appearing in the manual list.
 func PublishCountryAllowed(code string) bool {
 	_, allowed := map[string]struct{}{
-		// Nearby and established European exits.
-		"AT": {}, "BE": {}, "CH": {}, "CZ": {}, "DE": {}, "DK": {},
-		"EE": {}, "ES": {}, "FI": {}, "FR": {}, "GB": {}, "IE": {},
-		"IT": {}, "LT": {}, "LV": {}, "NL": {}, "NO": {}, "PL": {},
-		"SE": {},
-		// Distant fallbacks with an established public-server ecosystem.
-		"CA": {}, "HK": {}, "JP": {}, "KR": {}, "TW": {}, "US": {},
+		// Europe and nearby regional exits. Moldova and Croatia are intentional
+		// members; geography is not used as a judgement of a server operator.
+		"AM": {}, "AT": {}, "BE": {}, "BG": {}, "CH": {}, "CY": {},
+		"CZ": {}, "DE": {}, "DK": {}, "EE": {}, "ES": {}, "FI": {},
+		"FR": {}, "GB": {}, "GR": {}, "HR": {}, "HU": {}, "IE": {},
+		"IT": {}, "KZ": {}, "LT": {}, "LU": {}, "LV": {}, "MD": {},
+		"MT": {}, "NL": {}, "NO": {}, "PL": {}, "PT": {}, "RO": {},
+		"SE": {}, "SI": {}, "SK": {}, "TR": {}, "UZ": {},
+		// Distant emergency fallbacks.
+		"CA": {}, "US": {},
 	}[strings.ToUpper(strings.TrimSpace(code))]
 	return allowed
 }
