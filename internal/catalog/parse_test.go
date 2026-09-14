@@ -47,7 +47,7 @@ func TestParseVLESSRejectsNonUUIDIdentity(t *testing.T) {
 
 func TestCountryNameCoversPublishedTraceCodes(t *testing.T) {
 	for code, want := range map[string]string{
-		"HK": "Гонконг", "KR": "Южная Корея", "MD": "Молдова", "TW": "Тайвань",
+		"AU": "Австралия", "HK": "Гонконг", "KR": "Южная Корея", "MD": "Молдова", "TW": "Тайвань",
 	} {
 		if got := CountryName(code); got != want {
 			t.Fatalf("CountryName(%q) = %q, want %q", code, got, want)
