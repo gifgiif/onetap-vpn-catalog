@@ -9,7 +9,7 @@ import (
 )
 
 func TestDefaultYouTubeProbeUsesGenerate204(t *testing.T) {
-	if defaultYouTubeProbeURL != "https://youtube.com/generate_204" {
+	if defaultYouTubeProbeURL != "https://www.youtube.com/generate_204" {
 		t.Fatalf("unexpected YouTube publication gate: %s", defaultYouTubeProbeURL)
 	}
 }

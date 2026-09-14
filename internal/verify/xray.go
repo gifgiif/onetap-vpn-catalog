@@ -26,7 +26,10 @@ import (
 const (
 	probeBytes             = 256 << 10
 	defaultProbeURL        = "https://speed.cloudflare.com/__down?bytes=262144"
-	defaultYouTubeProbeURL = "https://youtube.com/generate_204"
+	// Keep this exactly aligned with Android and desktop. A worker-side probe
+	// must traverse the same YouTube host that clients use for their final
+	// activation gate.
+	defaultYouTubeProbeURL = "https://www.youtube.com/generate_204"
 	optionalProbeTimeout   = 4 * time.Second
 )
 
