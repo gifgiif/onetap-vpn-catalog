@@ -47,6 +47,15 @@ type cachedSource struct {
 	lines          []string
 }
 
+// sourcedLine keeps the public feed label alongside an URI until it has been
+// parsed and signed. The label is deliberately a short source class, never a
+// URL or subscriber-specific identifier; clients use it only as a local
+// selection hint.
+type sourcedLine struct {
+	source string
+	line   string
+}
+
 // RefreshReport is the safe, aggregate operational record printed by the
 // scheduled checker. It intentionally contains no URI, host, UUID, public
 // key, source URL, user data, or per-node failure detail.
@@ -128,19 +137,23 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 		}
 		r.lastReport = report
 	}()
-	var all []string
+	var all []sourcedLine
 	var changed bool
 	for _, source := range r.sources {
 		lines, updated, err := r.fetch(ctx, source)
 		if err != nil {
-			all = append(all, r.cache[source.URL].lines...)
+			for _, line := range r.cache[source.URL].lines {
+				all = append(all, sourcedLine{source: source.Name, line: line})
+			}
 			report.Sources = append(report.Sources, SourceReport{Name: source.Name, Status: "unavailable", Lines: len(r.cache[source.URL].lines)})
 			continue
 		}
 		if updated {
 			changed = true
 		}
-		all = append(all, lines...)
+		for _, line := range lines {
+			all = append(all, sourcedLine{source: source.Name, line: line})
+		}
 		status := "cached"
 		if updated {
 			status = "updated"
@@ -166,18 +179,36 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 		}
 	}
 	report.ExistingCandidates = len(candidates)
-	seen := make(map[string]bool)
-	for _, server := range candidates {
-		seen[catalog.RouteKey(server)] = true
+	type seenRoute struct {
+		inExisting bool
+		index      int
+	}
+	seen := make(map[string]seenRoute)
+	for index, server := range candidates {
+		seen[catalog.RouteKey(server)] = seenRoute{inExisting: true, index: index}
 	}
 	var incoming []catalog.VLESS
-	for _, line := range all {
-		if server, err := catalog.ParseVLESS(line, "upstream"); err == nil {
+	for _, item := range all {
+		if server, err := catalog.ParseVLESS(item.line, item.source); err == nil {
 			key := catalog.RouteKey(server)
-			if !seen[key] {
+			if route, exists := seen[key]; !exists {
 				incoming = append(incoming, server)
-				seen[key] = true
+				seen[key] = seenRoute{index: len(incoming) - 1}
 			} else {
+				// A route retained from an older catalog may still carry the
+				// historical flattened label. Refresh its provenance when the
+				// Russian mobile feed now publishes the same effective route.
+				if catalog.RussiaPreferredSource(server.Source) {
+					if route.inExisting {
+						if !catalog.RussiaPreferredSource(candidates[route.index].Source) {
+							candidates[route.index].Source = server.Source
+						}
+					} else {
+						if !catalog.RussiaPreferredSource(incoming[route.index].Source) {
+							incoming[route.index].Source = server.Source
+						}
+					}
+				}
 				report.DuplicateCandidates++
 			}
 		} else {
@@ -205,6 +236,10 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 	if len(candidates) == 0 {
 		return fmt.Errorf("no VLESS configurations passed the HTTPS probe")
 	}
+	// Candidate.Source has already been restricted to a source label above.
+	// Do not flatten it here: clients in Russia use the igareck mobile feed as
+	// a first-shot preference, while every route remains subject to the same
+	// independent HTTPS probe and phone-side confirmation.
 	if err := r.store.Replace("public-vless-feeds", candidates); err != nil {
 		return err
 	}
@@ -485,6 +520,15 @@ func DefaultSources() []Source {
 		// it can be necessary on restrictive networks, but it has different routing
 		// trade-offs and remains a future fallback after a phone-side probe.
 		{Name: "mobile-black", URL: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt"},
+		// The primary wider aggregate includes igareck among its upstreams and
+		// publishes a deduplicated verified list. Its own TCP check is useful
+		// signal, but never sufficient: every accepted route must still pass our
+		// strict parser and isolated YouTube HTTPS gate.
+		{Name: "ru-aggregate-verified", URL: "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt"},
+		// A broader Russia-oriented reserve. It contains transports unsupported by
+		// this client too; ParseVLESS rejects those before they can be probed or
+		// published. It intentionally receives no selection preference.
+		{Name: "wlunlocker-blacklist", URL: "https://raw.githubusercontent.com/wlunlocker/vpn-configs/main/blacklist_vpn1.txt"},
 		// Both Radikal feeds remain untrusted inputs. We repeat the restrictive URI
 		// parsing and isolated Xray HTTPS test before publishing either candidate.
 		{Name: "radikal-fast", URL: "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/fast/configs.txt"},
@@ -492,9 +536,6 @@ func DefaultSources() []Source {
 		// TLS/REALITY-only VLESS output; unsupported transports and options are
 		// rejected by ParseVLESS before any connection attempt.
 		{Name: "vovaplus-secure-vless", URL: "https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt"},
-		// This source checks only TCP itself, so it is never trusted directly.
-		// Its candidates still go through our strict parser and YouTube gate.
-		{Name: "aviamastersgh-verified", URL: "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt"},
 		// v2go publishes its protocol-specific VLESS feed as Base64 and validates
 		// routes through embedded Xray before publishing. We decode it locally and
 		// repeat our independent YouTube check.

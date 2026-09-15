@@ -257,6 +257,18 @@ func TestPersistentStoreRetainsSignedCatalogAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRussiaPreferredSourceRecognizesCuratedRussiaFeeds(t *testing.T) {
+	if !RussiaPreferredSource("mobile-black") || !RussiaPreferredSource("ru-aggregate-verified") {
+		t.Fatal("curated Russia feeds must retain their selection hint")
+	}
+	if RussiaPreferredSource("wlunlocker-blacklist") {
+		t.Fatal("broad reserve feed must not receive the Russia preference")
+	}
+	if RussiaPreferredSource("radikal-fast") {
+		t.Fatal("generic feed must not receive the Russian-mobile preference")
+	}
+}
+
 func newTestSigningKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := GenerateSigningKey()

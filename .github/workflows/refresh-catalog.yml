@@ -20,10 +20,10 @@ permissions:
 
 concurrency:
   group: catalog-refresh
-  # A delayed scheduled run must never hold up a newer snapshot. The normal
-  # check completes in about a minute; cancelling an old queued run gives the
-  # newest source view priority when GitHub's scheduler catches up late.
-  cancel-in-progress: true
+  # A scheduled job may be delayed by GitHub. Let an already-running health
+  # check finish and queue the next one rather than cancelling a nearly-ready
+  # signed catalog; the publisher itself is bounded to three minutes.
+  cancel-in-progress: false
 
 jobs:
   refresh:

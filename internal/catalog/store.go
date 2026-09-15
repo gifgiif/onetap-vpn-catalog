@@ -86,10 +86,15 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 	}
 	unique := map[string]VLESS{}
 	for _, candidate := range candidates {
-		candidate.Source = source
+		// Importers preserve a small, safe source label so clients can apply
+		// regional first-shot policy. Direct callers still receive the supplied
+		// default label, keeping legacy import paths compatible.
+		if strings.TrimSpace(candidate.Source) == "" {
+			candidate.Source = source
+		}
 		key := candidateKey(candidate)
 		previous, exists := unique[key]
-		if !exists || faster(candidate, previous) {
+		if !exists || faster(candidate, previous) || (sameSpeed(candidate, previous) && preferredSource(candidate.Source, previous.Source)) {
 			unique[key] = candidate
 		}
 	}
@@ -136,6 +141,29 @@ func (s *MemoryStore) Replace(source string, candidates []VLESS) error {
 	}
 	s.current = signed
 	return nil
+}
+
+func sameSpeed(a, b VLESS) bool {
+	return faster(a, b) == faster(b, a)
+}
+
+// The Russian mobile feed is the only upstream whose own maintenance targets
+// Russian censorship conditions. This is a preference for an equivalent
+// duplicate, never a replacement for our isolated HTTPS probe.
+func preferredSource(candidate, previous string) bool {
+	return RussiaPreferredSource(candidate) && !RussiaPreferredSource(previous)
+}
+
+// RussiaPreferredSource labels inputs which are independently curated for
+// Russian use cases. It is a local client-selection hint, never an assertion
+// that a route works for every Russian operator.
+func RussiaPreferredSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "mobile-black", "ru-aggregate-verified":
+		return true
+	default:
+		return strings.Contains(strings.ToLower(source), "igareck")
+	}
 }
 
 func persistSnapshot(path string, signed SignedCatalog) error {

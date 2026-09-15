@@ -99,6 +99,23 @@ func TestRefreshPublishesProbeMetrics(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesSafeSourceLabelForClientRegionalPreference(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
+	}))
+	defer feed.Close()
+	key, _ := catalog.GenerateSigningKey()
+	store := catalog.NewMemoryStore(key)
+	runner := New(store, []Source{{Name: "mobile-black", URL: feed.URL}}).WithChecker(successfulChecker{})
+	if err := runner.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Current().Payload.Servers
+	if len(got) != 1 || got[0].Source != "mobile-black" {
+		t.Fatalf("source provenance was flattened: %#v", got)
+	}
+}
+
 func TestRefreshReportContainsOnlyAggregateOperationalData(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("vless://11111111-1111-4111-8111-111111111111@1.1.1.1:443?encryption=none&security=tls&type=tcp"))
