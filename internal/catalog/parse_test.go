@@ -56,12 +56,12 @@ func TestCountryNameCoversPublishedTraceCodes(t *testing.T) {
 }
 
 func TestPublishCountryAllowedUsesExplicitWhitelist(t *testing.T) {
-	for _, code := range []string{"SG", "IN", "sg", "in", "", "HK", "JP", "BR"} {
+	for _, code := range []string{"SG", "IN", "sg", "in", "", "TW", "BR"} {
 		if PublishCountryAllowed(code) {
 			t.Fatalf("%q must not be published", code)
 		}
 	}
-	for _, code := range []string{"DE", "FI", "US", "MD", "HR", "uz"} {
+	for _, code := range []string{"DE", "FI", "US", "HK", "JP", "KR", "MD", "HR", "uz"} {
 		if !PublishCountryAllowed(code) {
 			t.Fatalf("%q should remain publishable", code)
 		}

@@ -98,8 +98,9 @@ func PublishCountryAllowed(code string) bool {
 		"IT": {}, "KZ": {}, "LT": {}, "LU": {}, "LV": {}, "MD": {},
 		"MT": {}, "NL": {}, "NO": {}, "PL": {}, "PT": {}, "RO": {},
 		"SE": {}, "SI": {}, "SK": {}, "TR": {}, "UZ": {},
-		// Distant emergency fallbacks.
-		"CA": {}, "US": {},
+		// Distant fallbacks, including Asian exits that can be preferable for
+		// users in Russia's Far East.
+		"CA": {}, "HK": {}, "JP": {}, "KR": {}, "US": {},
 	}[strings.ToUpper(strings.TrimSpace(code))]
 	return allowed
 }
