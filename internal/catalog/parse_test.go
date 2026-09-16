@@ -9,6 +9,26 @@ func TestParseVLESSAcceptsTLS(t *testing.T) {
 	}
 }
 
+func TestParseVLESSAcceptsNarrowXHTTPProfile(t *testing.T) {
+	server, err := ParseVLESS("vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&sni=cover.example.com&type=xhttp&host=edge.example.com&path=%2Fconnect&mode=stream-one&alpn=h2%2Chttp%2F1.1#Germany", "ru-whitelist-mobile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Type != "xhttp" || server.TransportHost != "edge.example.com" || server.Path != "/connect" || server.Mode != "stream-one" || server.ALPN != "h2,http/1.1" {
+		t.Fatalf("XHTTP fields were not preserved: %#v", server)
+	}
+}
+
+func TestParseVLESSDefaultsXHTTPModeToAuto(t *testing.T) {
+	server, err := ParseVLESS("vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&sni=cover.example.com&type=xhttp&host=edge.example.com&path=%2Fconnect&alpn=h2#Germany", "ru-whitelist-mobile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Mode != "auto" {
+		t.Fatalf("mode = %q, want auto", server.Mode)
+	}
+}
+
 func TestParseVLESSRejectsUnsafeAndUnsupported(t *testing.T) {
 	for _, raw := range []string{
 		"vless://id@127.0.0.1:443?encryption=none&security=tls&type=tcp",
@@ -16,6 +36,9 @@ func TestParseVLESSRejectsUnsafeAndUnsupported(t *testing.T) {
 		"vless://id@vpn.example.com:443?encryption=aes-128-gcm&security=tls&type=tcp",
 		"vless://id@vpn.example.com:443?encryption=none&security=tls&type=ws&path=/secret",
 		"vless://id@vpn.example.com:443?encryption=none&security=tls&type=grpc&serviceName=secret",
+		"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=xhttp&host=edge.example.com&path=/connect&mode=invalid",
+		"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=xhttp&host=edge.example.com&path=/connect&mode=stream-one&insecure=1",
+		"vless://11111111-1111-4111-8111-111111111111@vpn.example.com:443?encryption=none&security=tls&type=xhttp&host=edge.example.com&path=/connect&mode=stream-one&extra=%7B%7D",
 		"vless://id@100.64.0.1:443?encryption=none&security=tls&type=tcp",
 		"vless://id@[::ffff:127.0.0.1]:443?encryption=none&security=tls&type=tcp",
 	} {

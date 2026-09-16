@@ -159,7 +159,7 @@ func preferredSource(candidate, previous string) bool {
 // that a route works for every Russian operator.
 func RussiaPreferredSource(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "mobile-black", "ru-black-full", "ru-whitelist-mobile", "ru-aggregate-verified":
+	case "mobile-black", "ru-black-full", "ru-whitelist-mobile", "ru-whitelist-aggregate", "ru-aggregate-verified":
 		return true
 	default:
 		return strings.Contains(strings.ToLower(source), "igareck")
@@ -188,6 +188,23 @@ func readSnapshot(path string, privateKey *ecdsa.PrivateKey) (saved SignedCatalo
 	if err != nil {
 		return SignedCatalog{}, false, err
 	}
+	var header struct {
+		Payload struct {
+			SchemaVersion int    `json:"schemaVersion"`
+			Revision      uint64 `json:"revision"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(data, &header) == nil && header.Payload.SchemaVersion == 3 {
+		var legacy legacySignedCatalogV3
+		if json.Unmarshal(data, &legacy) != nil || legacy.Signature == "" {
+			return SignedCatalog{}, false, &persistenceError{"saved legacy catalog is malformed"}
+		}
+		payload, marshalErr := json.Marshal(legacy.Payload)
+		if marshalErr != nil || !VerifyPayloadSignature(&privateKey.PublicKey, payload, decodeSignature(legacy.Signature)) {
+			return SignedCatalog{}, false, &persistenceError{"saved legacy catalog signature is invalid"}
+		}
+		return SignedCatalog{Payload: Catalog{Revision: header.Payload.Revision}}, false, nil
+	}
 	if err := json.Unmarshal(data, &saved); err == nil && saved.Signature != "" {
 		payload, marshalErr := json.Marshal(saved.Payload)
 		if marshalErr != nil || !VerifyPayloadSignature(&privateKey.PublicKey, payload, decodeSignature(saved.Signature)) {
@@ -205,6 +222,41 @@ func readSnapshot(path string, privateKey *ecdsa.PrivateKey) (saved SignedCatalo
 	return SignedCatalog{Payload: Catalog{Revision: revision}}, false, nil
 }
 
+// legacySignedCatalogV3 is only used to verify and preserve the revision of a
+// schema-3 snapshot while upgrading the on-disk catalog to schema 4. Its field
+// order intentionally matches the historical signed JSON representation.
+type legacyVLESSV3 struct {
+	ID             string `json:"id"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	UUID           string `json:"uuid"`
+	Security       string `json:"security"`
+	SNI            string `json:"sni"`
+	PublicKey      string `json:"publicKey"`
+	ShortID        string `json:"shortId"`
+	Flow           string `json:"flow"`
+	Type           string `json:"type"`
+	Source         string `json:"source"`
+	CountryCode    string `json:"countryCode"`
+	CountryName    string `json:"countryName"`
+	LatencyMs      int    `json:"latencyMs"`
+	ThroughputKbps int    `json:"throughputKbps"`
+}
+
+type legacyCatalogV3 struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	Revision      uint64          `json:"revision"`
+	IssuedAt      time.Time       `json:"issuedAt"`
+	ExpiresAt     time.Time       `json:"expiresAt"`
+	Servers       []legacyVLESSV3 `json:"servers"`
+}
+
+type legacySignedCatalogV3 struct {
+	Payload   legacyCatalogV3 `json:"payload"`
+	Signature string          `json:"signature"`
+	KeyID     string          `json:"keyId"`
+}
+
 func decodeSignature(value string) []byte {
 	decoded, _ := base64.StdEncoding.DecodeString(value)
 	return decoded
@@ -215,7 +267,7 @@ type persistenceError struct{ message string }
 func (e *persistenceError) Error() string { return e.message }
 
 func candidateKey(server VLESS) string {
-	return strings.Join([]string{server.Host, strconv.Itoa(server.Port), server.UUID, server.Security, server.SNI, server.PublicKey, server.ShortID, server.Flow, server.Type}, "\x00")
+	return strings.Join([]string{server.Host, strconv.Itoa(server.Port), server.UUID, server.Security, server.SNI, server.PublicKey, server.ShortID, server.Flow, server.Type, server.TransportHost, server.Path, server.Mode, server.ALPN}, "\x00")
 }
 
 func faster(left, right VLESS) bool {

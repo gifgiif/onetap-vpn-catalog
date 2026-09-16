@@ -258,7 +258,7 @@ func TestPersistentStoreRetainsSignedCatalogAcrossRestart(t *testing.T) {
 }
 
 func TestRussiaPreferredSourceRecognizesCuratedRussiaFeeds(t *testing.T) {
-	if !RussiaPreferredSource("mobile-black") || !RussiaPreferredSource("ru-black-full") || !RussiaPreferredSource("ru-whitelist-mobile") || !RussiaPreferredSource("ru-aggregate-verified") {
+	if !RussiaPreferredSource("mobile-black") || !RussiaPreferredSource("ru-black-full") || !RussiaPreferredSource("ru-whitelist-mobile") || !RussiaPreferredSource("ru-whitelist-aggregate") || !RussiaPreferredSource("ru-aggregate-verified") {
 		t.Fatal("curated Russia feeds must retain their selection hint")
 	}
 	if RussiaPreferredSource("wlunlocker-blacklist") {

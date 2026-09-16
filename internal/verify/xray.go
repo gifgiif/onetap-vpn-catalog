@@ -268,6 +268,9 @@ func waitForSocks(ctx context.Context, address string) error {
 
 func xrayConfig(server catalog.VLESS, port int) map[string]any {
 	stream := map[string]any{"network": server.Type, "security": server.Security}
+	if server.Type == "xhttp" {
+		stream["xhttpSettings"] = map[string]any{"host": server.TransportHost, "path": server.Path, "mode": server.Mode}
+	}
 	if server.Security == "reality" {
 		stream["realitySettings"] = map[string]any{"serverName": server.SNI, "publicKey": server.PublicKey, "shortId": server.ShortID, "fingerprint": "chrome"}
 	} else {
@@ -275,7 +278,11 @@ func xrayConfig(server catalog.VLESS, port int) map[string]any {
 		if serverName == "" {
 			serverName = server.Host
 		}
-		stream["tlsSettings"] = map[string]any{"serverName": serverName, "allowInsecure": false}
+		tls := map[string]any{"serverName": serverName, "allowInsecure": false}
+		if server.ALPN != "" {
+			tls["alpn"] = strings.Split(server.ALPN, ",")
+		}
+		stream["tlsSettings"] = tls
 	}
 	user := map[string]any{"id": server.UUID, "encryption": "none"}
 	if server.Flow != "" {

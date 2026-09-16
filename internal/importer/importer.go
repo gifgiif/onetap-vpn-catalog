@@ -179,7 +179,7 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 	// These entries receive new expiry only after a new successful probe.
 	if saved, ok := r.store.(interface{ Current() catalog.SignedCatalog }); ok && r.checker != nil {
 		for _, server := range saved.Current().Payload.Servers {
-			if server.Type == "tcp" {
+			if server.Type == "tcp" || server.Type == "xhttp" {
 				candidates = append(candidates, server)
 			}
 		}
@@ -589,6 +589,10 @@ func DefaultSources() []Source {
 		// clients first exhaust ordinary Black List routes. Unsupported xHTTP,
 		// gRPC and insecure-TLS profiles remain rejected by ParseVLESS.
 		{Name: "ru-whitelist-mobile", URL: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"},
+		// A second Russian allow-list feed. It contributes only profiles that
+		// conform to the same fixed XHTTP/TLS-or-REALITY model and pass our
+		// independent Xray → YouTube test.
+		{Name: "ru-whitelist-aggregate", URL: "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/ru_configs.txt"},
 		// The primary wider aggregate includes igareck among its upstreams and
 		// publishes a deduplicated verified list. Its own TCP check is useful
 		// signal, but never sufficient: every accepted route must still pass our

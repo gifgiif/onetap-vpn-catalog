@@ -3,7 +3,7 @@ package catalog
 import "time"
 
 const (
-	SchemaVersion = 3
+	SchemaVersion = 4
 	DefaultSource = "igareck/vpn-configs-for-russia"
 	// KeyID is informational but lets clients distinguish a legitimate signing
 	// key rotation from a replay of an older catalog under the same key.
@@ -21,6 +21,10 @@ type VLESS struct {
 	ShortID        string `json:"shortId"`
 	Flow           string `json:"flow"`
 	Type           string `json:"type"`
+	TransportHost  string `json:"transportHost"`
+	Path           string `json:"path"`
+	Mode           string `json:"mode"`
+	ALPN           string `json:"alpn"`
 	Source         string `json:"source"`
 	CountryCode    string `json:"countryCode"`
 	CountryName    string `json:"countryName"`

@@ -39,32 +39,98 @@ func ParseVLESS(raw, source string) (VLESS, error) {
 		return VLESS{}, err
 	}
 	q := u.Query()
-	security, networkType := q.Get("security"), q.Get("type")
+	security, networkType := strings.ToLower(q.Get("security")), strings.ToLower(q.Get("type"))
 	if networkType == "" {
 		networkType = "tcp"
 	}
 	if q.Get("encryption") != "none" || (security != "tls" && security != "reality") {
 		return VLESS{}, fmt.Errorf("unsupported VLESS security")
 	}
-	if networkType != "tcp" {
+	if q.Get("allowInsecure") == "1" || strings.EqualFold(q.Get("allowInsecure"), "true") || q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true") {
+		return VLESS{}, fmt.Errorf("insecure TLS is forbidden")
+	}
+	if networkType != "tcp" && networkType != "xhttp" {
 		return VLESS{}, fmt.Errorf("unsupported transport")
 	}
-	// v3 cannot represent WS paths, gRPC service names or TCP HTTP camouflage.
-	// Reject unsupported semantics instead of silently publishing a broken route.
-	if q.Get("headerType") != "" && q.Get("headerType") != "none" || q.Get("path") != "" || q.Get("serviceName") != "" {
+	// The catalog deliberately supports only raw TCP and a narrow, auditable
+	// XHTTP profile. WS, gRPC and arbitrary Xray `extra` JSON remain
+	// rejected: a public subscription must never control our client routing.
+	if q.Get("headerType") != "" && q.Get("headerType") != "none" || q.Get("serviceName") != "" || q.Get("extra") != "" {
 		return VLESS{}, fmt.Errorf("unsupported transport options")
 	}
-	if security == "tls" && q.Get("allowInsecure") == "1" {
-		return VLESS{}, fmt.Errorf("insecure TLS is forbidden")
+	transportHost, path, mode, alpn := "", "", "", ""
+	if networkType == "tcp" {
+		if q.Get("path") != "" || q.Get("host") != "" || q.Get("mode") != "" || q.Get("alpn") != "" {
+			return VLESS{}, fmt.Errorf("unsupported TCP transport options")
+		}
+	} else {
+		transportHost = strings.ToLower(strings.TrimSpace(q.Get("host")))
+		path = q.Get("path")
+		mode = strings.ToLower(strings.TrimSpace(q.Get("mode")))
+		if mode == "" {
+			mode = "auto"
+		}
+		if err := validateXHTTP(transportHost, path, mode); err != nil {
+			return VLESS{}, err
+		}
+		var err error
+		alpn, err = normalizeALPN(q.Get("alpn"))
+		if err != nil {
+			return VLESS{}, err
+		}
+		if q.Get("flow") != "" {
+			return VLESS{}, fmt.Errorf("XHTTP flow is unsupported")
+		}
 	}
 	if security == "reality" && (q.Get("pbk") == "" || q.Get("sni") == "") {
 		return VLESS{}, fmt.Errorf("incomplete REALITY configuration")
 	}
 	code, name := countryFromLabel(u.Fragment)
-	server := VLESS{Host: strings.ToLower(u.Hostname()), Port: port, UUID: u.User.Username(), Security: security, SNI: q.Get("sni"), PublicKey: q.Get("pbk"), ShortID: q.Get("sid"), Flow: q.Get("flow"), Type: networkType, Source: source, CountryCode: code, CountryName: name}
+	server := VLESS{Host: strings.ToLower(u.Hostname()), Port: port, UUID: u.User.Username(), Security: security, SNI: q.Get("sni"), PublicKey: q.Get("pbk"), ShortID: q.Get("sid"), Flow: q.Get("flow"), Type: networkType, TransportHost: transportHost, Path: path, Mode: mode, ALPN: alpn, Source: source, CountryCode: code, CountryName: name}
 	sum := sha256.Sum256([]byte(candidateKey(server)))
 	server.ID = hex.EncodeToString(sum[:12])
 	return server, nil
+}
+
+func validateXHTTP(host, path, mode string) error {
+	if err := validateHost(host); err != nil {
+		return fmt.Errorf("invalid XHTTP host: %w", err)
+	}
+	if len(path) == 0 || len(path) > 512 || !strings.HasPrefix(path, "/") || strings.Contains(path, "//") || strings.ContainsAny(path, "?#") {
+		return fmt.Errorf("invalid XHTTP path")
+	}
+	for _, value := range path {
+		if value <= 0x20 || value == 0x7f {
+			return fmt.Errorf("invalid XHTTP path")
+		}
+	}
+	if mode != "auto" && mode != "packet-up" && mode != "stream-up" && mode != "stream-one" {
+		return fmt.Errorf("unsupported XHTTP mode")
+	}
+	return nil
+}
+
+func normalizeALPN(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	allowed := map[string]bool{"h2": true, "h3": true, "http/1.1": true}
+	seen := map[string]bool{}
+	values := make([]string, 0, 3)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if !allowed[part] {
+			return "", fmt.Errorf("unsupported ALPN")
+		}
+		if !seen[part] {
+			seen[part] = true
+			values = append(values, part)
+		}
+	}
+	if !seen["h2"] && !seen["h3"] {
+		return "", fmt.Errorf("XHTTP requires HTTP/2 or HTTP/3")
+	}
+	return strings.Join(values, ","), nil
 }
 
 // Same effective route keeps its ID when a feed renames or reorders a URI.
