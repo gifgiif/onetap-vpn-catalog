@@ -227,6 +227,31 @@ func TestRefreshSelectionIsBoundedDistinctAndRotates(t *testing.T) {
 	}
 }
 
+func TestRefreshSelectionReservesSlotsForRussiaOrientedFeeds(t *testing.T) {
+	existing := make([]catalog.VLESS, 48)
+	incoming := make([]catalog.VLESS, 24)
+	for index := range existing {
+		existing[index] = catalog.VLESS{ID: fmt.Sprintf("existing-%02d", index), Host: fmt.Sprintf("existing-%02d", index)}
+	}
+	for index := range incoming {
+		source := "generic"
+		if index < 16 {
+			source = "ru-black-full"
+		}
+		incoming[index] = catalog.VLESS{ID: fmt.Sprintf("incoming-%02d", index), Host: fmt.Sprintf("incoming-%02d", index), Source: source}
+	}
+	got := selectRefreshCandidates(existing, incoming, scheduledCandidateLimit, time.Unix(0, 0).UTC())
+	preferred := 0
+	for _, server := range got {
+		if catalog.RussiaPreferredSource(server.Source) {
+			preferred++
+		}
+	}
+	if preferred != russiaPreferredCandidateSlots {
+		t.Fatalf("wanted %d Russia-oriented slots, got %d", russiaPreferredCandidateSlots, preferred)
+	}
+}
+
 func TestSubscriptionLinesDecodesBase64VLESSFeed(t *testing.T) {
 	uri := "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&security=tls&type=tcp"
 	encoded := base64.RawStdEncoding.EncodeToString([]byte(uri + "\n"))

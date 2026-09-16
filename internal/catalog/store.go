@@ -159,7 +159,7 @@ func preferredSource(candidate, previous string) bool {
 // that a route works for every Russian operator.
 func RussiaPreferredSource(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "mobile-black", "ru-aggregate-verified":
+	case "mobile-black", "ru-black-full", "ru-whitelist-mobile", "ru-aggregate-verified":
 		return true
 	default:
 		return strings.Contains(strings.ToLower(source), "igareck")

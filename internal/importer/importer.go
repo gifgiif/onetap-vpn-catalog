@@ -103,6 +103,11 @@ const (
 	maxSourceLines          = 6000
 	scheduledCandidateLimit = 48
 	retainedCandidateSlots  = 36
+	// Reserve part of every CI run for the curated Russia-oriented feeds. The
+	// rest remains a rotating sample of the signed pool and broader sources;
+	// otherwise a large generic feed could statistically starve a small
+	// mobile/allow-list feed forever.
+	russiaPreferredCandidateSlots = 12
 )
 
 func New(store MutableStore, sources []Source) *Runner {
@@ -276,10 +281,19 @@ func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now 
 	if limit <= 0 {
 		return nil
 	}
-	retain := min(limit, retainedCandidateSlots)
-	selected := sampleCandidatesAt(existing, retain, now)
-	if len(selected) < retain {
-		selected = append(selected, sampleWithoutRoutes(incoming, selected, retain-len(selected), now)...)
+	preferred := make([]catalog.VLESS, 0)
+	for _, server := range append(append([]catalog.VLESS(nil), existing...), incoming...) {
+		if catalog.RussiaPreferredSource(server.Source) {
+			preferred = append(preferred, server)
+		}
+	}
+	reserved := min(min(limit, russiaPreferredCandidateSlots), len(preferred))
+	selected := sampleCandidatesAt(preferred, reserved, now)
+	retain := min(limit-len(selected), retainedCandidateSlots)
+	retainedTarget := len(selected) + retain
+	selected = append(selected, sampleWithoutRoutes(existing, selected, retain, now)...)
+	if len(selected) < retainedTarget {
+		selected = append(selected, sampleWithoutRoutes(incoming, selected, retainedTarget-len(selected), now)...)
 	}
 	if len(selected) < limit {
 		selected = append(selected, sampleWithoutRoutes(incoming, selected, limit-len(selected), now)...)
@@ -520,6 +534,15 @@ func DefaultSources() []Source {
 		// it can be necessary on restrictive networks, but it has different routing
 		// trade-offs and remains a future fallback after a phone-side probe.
 		{Name: "mobile-black", URL: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt"},
+		// The full Black List is a larger RU-maintained VLESS set. It is useful
+		// when its shorter mobile profile is temporarily thin, but every route
+		// still goes through the same parser and isolated Xray → YouTube gate.
+		{Name: "ru-black-full", URL: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"},
+		// This is the upstream's compact CIDR/allow-list profile for restrictive
+		// Russian mobile networks. We keep it separate in the source label so
+		// clients first exhaust ordinary Black List routes. Unsupported xHTTP,
+		// gRPC and insecure-TLS profiles remain rejected by ParseVLESS.
+		{Name: "ru-whitelist-mobile", URL: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"},
 		// The primary wider aggregate includes igareck among its upstreams and
 		// publishes a deduplicated verified list. Its own TCP check is useful
 		// signal, but never sufficient: every accepted route must still pass our
