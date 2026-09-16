@@ -438,7 +438,10 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catal
 			// This bounds DNS validation, Xray startup and the YouTube gate as one
 			// unit. A dead node must release its worker quickly instead of making
 			// later candidates wait behind a long network timeout.
-			probeCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
+			// Match the patient phone-side ceiling for Russia-oriented routes.
+			// The deadline still wraps DNS validation, Xray startup and YouTube,
+			// so a dead public node cannot occupy a worker indefinitely.
+			probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			if err := catalog.ValidateResolvedPublicHost(probeCtx, server.Host); err != nil {
 				results <- probeResult{outcome: "destination"}
