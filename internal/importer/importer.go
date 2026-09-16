@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -288,7 +289,7 @@ func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now 
 		}
 	}
 	reserved := min(min(limit, russiaPreferredCandidateSlots), len(preferred))
-	selected := sampleCandidatesAt(preferred, reserved, now)
+	selected := samplePreferredBySource(preferred, reserved, now)
 	retain := min(limit-len(selected), retainedCandidateSlots)
 	retainedTarget := len(selected) + retain
 	selected = append(selected, sampleWithoutRoutes(existing, selected, retain, now)...)
@@ -300,6 +301,48 @@ func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now 
 	}
 	if len(selected) < limit {
 		selected = append(selected, sampleWithoutRoutes(existing, selected, limit-len(selected), now)...)
+	}
+	return selected
+}
+
+// samplePreferredBySource gives every curated RU source a turn in the bounded
+// worker. A single large aggregate must not keep the full Black List or the
+// CIDR fallback from ever reaching the independent Xray/YouTube verification.
+func samplePreferredBySource(candidates []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates
+	}
+	bySource := make(map[string][]catalog.VLESS)
+	for _, server := range candidates {
+		bySource[server.Source] = append(bySource[server.Source], server)
+	}
+	sources := make([]string, 0, len(bySource))
+	for source := range bySource {
+		sources = append(sources, source)
+	}
+	sort.Strings(sources)
+	selected := make([]catalog.VLESS, 0, limit)
+	seen := make(map[string]bool)
+	for pass := 0; len(selected) < limit; pass++ {
+		added := false
+		for _, source := range sources {
+			// The sample size grows one position per pass. The deterministic
+			// slot rotation inside sampleCandidatesAt keeps the actual route
+			// different across scheduled runs.
+			choices := sampleCandidatesAt(bySource[source], pass+1, now)
+			for _, server := range choices {
+				key := catalog.RouteKey(server)
+				if seen[key] || len(selected) >= limit {
+					continue
+				}
+				seen[key] = true
+				selected = append(selected, server)
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
 	}
 	return selected
 }

@@ -252,6 +252,24 @@ func TestRefreshSelectionReservesSlotsForRussiaOrientedFeeds(t *testing.T) {
 	}
 }
 
+func TestRefreshSelectionDoesNotLetOneRussiaFeedStarveAnother(t *testing.T) {
+	candidates := make([]catalog.VLESS, 0, 40)
+	for index := 0; index < 30; index++ {
+		candidates = append(candidates, catalog.VLESS{ID: fmt.Sprintf("aggregate-%02d", index), Host: fmt.Sprintf("aggregate-%02d", index), Source: "ru-aggregate-verified"})
+	}
+	for index := 0; index < 10; index++ {
+		candidates = append(candidates, catalog.VLESS{ID: fmt.Sprintf("whitelist-%02d", index), Host: fmt.Sprintf("whitelist-%02d", index), Source: "ru-whitelist-mobile"})
+	}
+	got := samplePreferredBySource(candidates, 12, time.Unix(0, 0).UTC())
+	counts := map[string]int{}
+	for _, server := range got {
+		counts[server.Source]++
+	}
+	if counts["ru-aggregate-verified"] == 0 || counts["ru-whitelist-mobile"] == 0 {
+		t.Fatalf("a curated source was starved: %#v", counts)
+	}
+}
+
 func TestSubscriptionLinesDecodesBase64VLESSFeed(t *testing.T) {
 	uri := "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&security=tls&type=tcp"
 	encoded := base64.RawStdEncoding.EncodeToString([]byte(uri + "\n"))
