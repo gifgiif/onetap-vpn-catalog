@@ -93,11 +93,11 @@ type probeReport struct {
 	rejectedConnectivity int
 }
 
-// candidateSampleSlot matches the normal scheduled refresh. Each scheduled
+// candidateSampleSlot matches the normal hourly refresh. Each scheduled
 // run therefore advances to the next deterministic slice rather than skipping
 // through a pattern that can leave part of a large feed untested for longer.
 const (
-	candidateSampleSlot = 15 * time.Minute
+	candidateSampleSlot = time.Hour
 	// Free feeds can suddenly grow to many megabytes. The checker needs a
 	// rotating shortlist, not an unbounded mirror of every upstream database.
 	defaultSourceMaxBytes   = 1 << 20
@@ -275,7 +275,7 @@ func sampleCandidates(candidates []catalog.VLESS, limit int) []catalog.VLESS {
 }
 
 // selectRefreshCandidates keeps most slots for the current signed pool while
-// rotating both it and new upstream candidates on every quarter-hour slot.
+// rotating both it and new upstream candidates on every hourly slot.
 // This prevents a huge feed from crowding out proven routes and prevents the
 // first page of either group from being retried forever.
 func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
