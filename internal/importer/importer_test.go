@@ -30,6 +30,23 @@ func (c *selectiveChecker) Probe(_ context.Context, server catalog.VLESS) (catal
 	return catalog.ProbeMetrics{LatencyMs: 100, ThroughputKbps: 4000, CountryCode: "DE"}, nil
 }
 
+type transientChecker struct{ calls map[string]int }
+
+func (c *transientChecker) Probe(_ context.Context, server catalog.VLESS) (catalog.ProbeMetrics, error) {
+	c.calls[server.ID]++
+	if c.calls[server.ID] == 1 {
+		return catalog.ProbeMetrics{}, fmt.Errorf("temporary route failure")
+	}
+	return catalog.ProbeMetrics{LatencyMs: 110, CountryCode: "DE"}, nil
+}
+
+type cancelingChecker struct{ cancel context.CancelFunc }
+
+func (c cancelingChecker) Probe(_ context.Context, _ catalog.VLESS) (catalog.ProbeMetrics, error) {
+	c.cancel()
+	return catalog.ProbeMetrics{LatencyMs: 100, CountryCode: "DE"}, nil
+}
+
 type countryChecker struct{ code string }
 
 func (c countryChecker) Probe(context.Context, catalog.VLESS) (catalog.ProbeMetrics, error) {
@@ -55,8 +72,42 @@ func TestRefreshRechecksExistingPoolWhenFeedsAreUnavailable(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "alive" || got[0].CountryCode != "DE" {
 		t.Fatalf("invalid surviving pool: %#v", got)
 	}
-	if checker.calls["alive"] != 1 || checker.calls["dead"] != 1 {
+	if checker.calls["alive"] != 1 || checker.calls["dead"] != 2 {
 		t.Fatal("published pool was not rechecked")
+	}
+}
+
+func TestRefreshKeepsPreviouslyPublishedRouteAfterOneTransientProbeFailure(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
+	defer source.Close()
+	key, _ := catalog.GenerateSigningKey()
+	store := catalog.NewMemoryStore(key)
+	_ = store.Replace("old", []catalog.VLESS{{ID: "flaky", Host: "1.1.1.1", UUID: "a", Port: 443, Security: "tls", Type: "tcp"}})
+	checker := &transientChecker{calls: map[string]int{}}
+	runner := New(store, []Source{{Name: "test", URL: source.URL}}).WithChecker(checker)
+	if err := runner.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if checker.calls["flaky"] != 2 || len(store.Current().Payload.Servers) != 1 {
+		t.Fatalf("transiently failing route was not confirmed and retained: calls=%d", checker.calls["flaky"])
+	}
+}
+
+func TestRefreshDeadlineCannotPublishPartialCatalog(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
+	defer source.Close()
+	key, _ := catalog.GenerateSigningKey()
+	store := catalog.NewMemoryStore(key)
+	_ = store.Replace("old", []catalog.VLESS{{ID: "alive", Host: "1.1.1.1", UUID: "a", Port: 443, Security: "tls", Type: "tcp"}})
+	previousRevision := store.Current().Payload.Revision
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := New(store, []Source{{Name: "test", URL: source.URL}}).WithChecker(cancelingChecker{cancel: cancel})
+	if err := runner.Refresh(ctx); err == nil {
+		t.Fatal("canceled refresh unexpectedly succeeded")
+	}
+	if got := store.Current().Payload.Revision; got != previousRevision {
+		t.Fatalf("partial refresh replaced revision %d with %d", previousRevision, got)
 	}
 }
 
@@ -202,9 +253,11 @@ func TestSampleCandidatesUsesDeterministicRapidSlots(t *testing.T) {
 
 func TestRefreshSelectionIsBoundedDistinctAndRotates(t *testing.T) {
 	existing := make([]catalog.VLESS, 40)
-	incoming := make([]catalog.VLESS, 40)
+	incoming := make([]catalog.VLESS, 80)
 	for index := range existing {
 		existing[index] = catalog.VLESS{ID: fmt.Sprintf("existing-%02d", index), Host: fmt.Sprintf("existing-%02d", index)}
+	}
+	for index := range incoming {
 		incoming[index] = catalog.VLESS{ID: fmt.Sprintf("incoming-%02d", index), Host: fmt.Sprintf("incoming-%02d", index)}
 	}
 	start := time.Unix(0, 0).UTC()
@@ -221,14 +274,56 @@ func TestRefreshSelectionIsBoundedDistinctAndRotates(t *testing.T) {
 			}
 			seen[catalog.RouteKey(server)] = true
 		}
+		for _, server := range existing {
+			if !seen[catalog.RouteKey(server)] {
+				t.Fatalf("published route %s disappeared without a fresh probe", server.ID)
+			}
+		}
 	}
 	if sameCandidateIDs(first, second) {
 		t.Fatal("two scheduled slots selected the same routes")
 	}
 }
 
+func TestRefreshSelectionRechecksFullPublishedPoolAndLeavesDiscoverySlots(t *testing.T) {
+	existing := make([]catalog.VLESS, 64)
+	incoming := make([]catalog.VLESS, 48)
+	for index := range existing {
+		existing[index] = catalog.VLESS{ID: fmt.Sprintf("existing-%02d", index), Host: fmt.Sprintf("existing-%02d", index)}
+	}
+	for index := range incoming {
+		incoming[index] = catalog.VLESS{ID: fmt.Sprintf("incoming-%02d", index), Host: fmt.Sprintf("incoming-%02d", index)}
+	}
+	selected := selectRefreshCandidates(existing, incoming, scheduledCandidateLimit, time.Unix(0, 0).UTC())
+	if len(selected) != scheduledCandidateLimit {
+		t.Fatalf("got %d selected routes, want %d", len(selected), scheduledCandidateLimit)
+	}
+	seen := make(map[string]bool, len(selected))
+	for _, server := range selected {
+		key := catalog.RouteKey(server)
+		if seen[key] {
+			t.Fatalf("route %s received two probe slots", server.ID)
+		}
+		seen[key] = true
+	}
+	for _, server := range existing {
+		if !seen[catalog.RouteKey(server)] {
+			t.Fatalf("published route %s was not rechecked", server.ID)
+		}
+	}
+	newRoutes := 0
+	for _, server := range incoming {
+		if seen[catalog.RouteKey(server)] {
+			newRoutes++
+		}
+	}
+	if newRoutes != scheduledCandidateLimit-len(existing) {
+		t.Fatalf("checked %d new routes, want %d", newRoutes, scheduledCandidateLimit-len(existing))
+	}
+}
+
 func TestRefreshSelectionReservesSlotsForRussiaOrientedFeeds(t *testing.T) {
-	existing := make([]catalog.VLESS, 48)
+	existing := make([]catalog.VLESS, 64)
 	incoming := make([]catalog.VLESS, 24)
 	for index := range existing {
 		existing[index] = catalog.VLESS{ID: fmt.Sprintf("existing-%02d", index), Host: fmt.Sprintf("existing-%02d", index)}

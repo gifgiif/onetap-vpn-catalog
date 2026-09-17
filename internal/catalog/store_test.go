@@ -138,6 +138,22 @@ func TestStoreCountryCapKeepsAllFreshRoutesWhenOnlyOneCountryPasses(t *testing.T
 	}
 }
 
+func TestStoreLeavesRoomToRecheckPublishedPoolAndDiscoverNewRoutes(t *testing.T) {
+	key := newTestSigningKey(t)
+	store := NewMemoryStore(key)
+	servers := make([]VLESS, 0, maxCatalogServers+12)
+	for index := 0; index < maxCatalogServers+12; index++ {
+		id := fmt.Sprintf("route-%02d", index)
+		servers = append(servers, VLESS{ID: id, Host: id + ".example", UUID: id, Security: "tls", SNI: id + ".example", Type: "tcp", LatencyMs: 100})
+	}
+	if err := store.Replace("test", servers); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(store.Current().Payload.Servers); got != maxCatalogServers {
+		t.Fatalf("published %d routes, want the %d-route recheck cap", got, maxCatalogServers)
+	}
+}
+
 func TestStoreCountryCapLimitsSingleCountryOverflowToUsefulFloor(t *testing.T) {
 	key := newTestSigningKey(t)
 	store := NewMemoryStore(key)

@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	// Keep a discovery budget in the scheduled 80-candidate check. Every
+	// published route can then be rechecked before new feed entries compete
+	// for the remaining slots on the next run.
 	maxCatalogServers   = 64
 	maxRoutesPerCountry = 4
 	minimumUsefulRoutes = 12

@@ -22,13 +22,15 @@ concurrency:
   group: catalog-refresh
   # A scheduled job may be delayed by GitHub. Let an already-running health
   # check finish and queue the next one rather than cancelling a nearly-ready
-  # signed catalog; the publisher itself is bounded to three minutes.
+  # signed catalog; each publisher attempt is bounded to four minutes.
   cancel-in-progress: false
 
 jobs:
   refresh:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    # Two bounded publisher attempts plus the pinned-core download need more
+    # than eight minutes when the first attempt reaches its full deadline.
+    timeout-minutes: 11
     steps:
       # Pinned to immutable upstream commits; tags alone can move.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

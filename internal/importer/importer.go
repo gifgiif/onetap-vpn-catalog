@@ -102,19 +102,17 @@ const (
 	// rotating shortlist, not an unbounded mirror of every upstream database.
 	defaultSourceMaxBytes   = 1 << 20
 	maxSourceLines          = 6000
-	scheduledCandidateLimit = 48
-	retainedCandidateSlots  = 36
-	// Reserve part of every CI run for the curated Russia-oriented feeds. The
-	// rest remains a rotating sample of the signed pool and broader sources;
-	// otherwise a large generic feed could statistically starve a small
-	// mobile/allow-list feed forever.
+	scheduledCandidateLimit = 80
+	// Reserve part of the discovery budget for curated Russia-oriented feeds.
+	// The published pool is always rechecked first; the remaining slots rotate
+	// through new entries so a large generic feed cannot starve mobile feeds.
 	russiaPreferredCandidateSlots = 12
 )
 
 func New(store MutableStore, sources []Source) *Runner {
 	// Keep a refresh bounded: candidates are Xray processes, not cheap TCP dials.
 	// Six checks are small enough for the pilot host and let the full queue finish
-	// well inside the fifteen-minute refresh window.
+	// within the scheduled refresh window.
 	return &Runner{client: &http.Client{Timeout: 12 * time.Second}, store: store, sources: sources, cache: map[string]cachedSource{}, parallelism: 6}
 }
 
@@ -143,10 +141,39 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 		}
 		r.lastReport = report
 	}()
+	// Fetch independent feeds concurrently, but keep their input and report
+	// order stable. This leaves enough of the four-minute run for the larger
+	// health-check batch without making ten slow source requests serial.
+	type fetchedSource struct {
+		lines   []string
+		updated bool
+		cache   cachedSource
+		err     error
+	}
+	fetched := make([]fetchedSource, len(r.sources))
+	fetchSlots := make(chan struct{}, 4)
+	var fetches sync.WaitGroup
+	for index, source := range r.sources {
+		fetches.Add(1)
+		previous := r.cache[source.URL]
+		go func(index int, source Source, previous cachedSource) {
+			defer fetches.Done()
+			select {
+			case fetchSlots <- struct{}{}:
+				defer func() { <-fetchSlots }()
+			case <-ctx.Done():
+				fetched[index].err = ctx.Err()
+				return
+			}
+			fetched[index].lines, fetched[index].updated, fetched[index].cache, fetched[index].err = r.fetch(ctx, source, previous)
+		}(index, source, previous)
+	}
+	fetches.Wait()
 	var all []sourcedLine
 	var changed bool
-	for _, source := range r.sources {
-		lines, updated, err := r.fetch(ctx, source)
+	for index, source := range r.sources {
+		result := fetched[index]
+		lines, updated, err := result.lines, result.updated, result.err
 		if err != nil {
 			for _, line := range r.cache[source.URL].lines {
 				all = append(all, sourcedLine{source: source.Name, line: line})
@@ -154,6 +181,7 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 			report.Sources = append(report.Sources, SourceReport{Name: source.Name, Status: "unavailable", Lines: len(r.cache[source.URL].lines)})
 			continue
 		}
+		r.cache[source.URL] = result.cache
 		if updated {
 			changed = true
 		}
@@ -175,12 +203,14 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 		return nil
 	}
 	candidates := make([]catalog.VLESS, 0, len(all))
+	previouslyPublished := make(map[string]bool)
 	// Recheck the published pool first, even if a source is temporarily down.
 	// These entries receive new expiry only after a new successful probe.
 	if saved, ok := r.store.(interface{ Current() catalog.SignedCatalog }); ok && r.checker != nil {
 		for _, server := range saved.Current().Payload.Servers {
 			if server.Type == "tcp" || server.Type == "xhttp" {
 				candidates = append(candidates, server)
+				previouslyPublished[catalog.RouteKey(server)] = true
 			}
 		}
 	}
@@ -233,11 +263,16 @@ func (r *Runner) Refresh(ctx context.Context) (err error) {
 	report.SelectedCandidates = len(candidates)
 	if r.checker != nil {
 		var checked probeReport
-		candidates, checked = r.check(ctx, candidates)
+		candidates, checked = r.check(ctx, candidates, previouslyPublished)
 		report.ProbeAccepted = checked.accepted
 		report.ProbeExcludedCountry = checked.excludedCountry
 		report.ProbeRejectedDestination = checked.rejectedDestination
 		report.ProbeRejectedConnectivity = checked.rejectedConnectivity
+	}
+	// A global deadline must not publish a partial pool. An incomplete check
+	// says nothing about routes still queued behind the bounded worker pool.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if len(candidates) == 0 {
 		return fmt.Errorf("no VLESS configurations passed the HTTPS probe")
@@ -274,34 +309,32 @@ func sampleCandidates(candidates []catalog.VLESS, limit int) []catalog.VLESS {
 	return sampleCandidatesAt(candidates, limit, time.Now().UTC())
 }
 
-// selectRefreshCandidates keeps most slots for the current signed pool while
-// rotating both it and new upstream candidates on every hourly slot.
-// This prevents a huge feed from crowding out proven routes and prevents the
-// first page of either group from being retried forever.
+// Recheck the entire published pool before replacing its signed snapshot.
+// A previously working route must not disappear just because a bounded
+// worker sampled another slice of the source feeds. The catalog cap leaves
+// at least sixteen slots for discovering new routes on normal runs.
 func selectRefreshCandidates(existing, incoming []catalog.VLESS, limit int, now time.Time) []catalog.VLESS {
 	if limit <= 0 {
 		return nil
 	}
+	selected := append([]catalog.VLESS(nil), existing...)
+	if len(selected) > limit {
+		return sampleCandidatesAt(selected, limit, now)
+	}
 	preferred := make([]catalog.VLESS, 0)
-	for _, server := range append(append([]catalog.VLESS(nil), existing...), incoming...) {
+	broader := make([]catalog.VLESS, 0)
+	for _, server := range incoming {
 		if catalog.RussiaPreferredSource(server.Source) {
 			preferred = append(preferred, server)
+		} else {
+			broader = append(broader, server)
 		}
 	}
-	reserved := min(min(limit, russiaPreferredCandidateSlots), len(preferred))
-	selected := samplePreferredBySource(preferred, reserved, now)
-	retain := min(limit-len(selected), retainedCandidateSlots)
-	retainedTarget := len(selected) + retain
-	selected = append(selected, sampleWithoutRoutes(existing, selected, retain, now)...)
-	if len(selected) < retainedTarget {
-		selected = append(selected, sampleWithoutRoutes(incoming, selected, retainedTarget-len(selected), now)...)
-	}
-	if len(selected) < limit {
-		selected = append(selected, sampleWithoutRoutes(incoming, selected, limit-len(selected), now)...)
-	}
-	if len(selected) < limit {
-		selected = append(selected, sampleWithoutRoutes(existing, selected, limit-len(selected), now)...)
-	}
+	remaining := limit - len(selected)
+	reserved := min(min(remaining, russiaPreferredCandidateSlots), len(preferred))
+	selected = append(selected, samplePreferredBySource(preferred, reserved, now)...)
+	selected = append(selected, sampleWithoutRoutes(broader, selected, limit-len(selected), now)...)
+	selected = append(selected, sampleWithoutRoutes(preferred, selected, limit-len(selected), now)...)
 	return selected
 }
 
@@ -412,7 +445,7 @@ func greatestCommonDivisor(left, right int) int {
 	return left
 }
 
-func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catalog.VLESS, probeReport) {
+func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS, previouslyPublished map[string]bool) ([]catalog.VLESS, probeReport) {
 	limit := r.parallelism
 	if limit < 1 {
 		limit = 1
@@ -435,19 +468,30 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catal
 				return
 			}
 			defer func() { <-semaphore }()
-			// This bounds DNS validation, Xray startup and the YouTube gate as one
-			// unit. A dead node must release its worker quickly instead of making
-			// later candidates wait behind a long network timeout.
-			// Match the patient phone-side ceiling for Russia-oriented routes.
-			// The deadline still wraps DNS validation, Xray startup and YouTube,
-			// so a dead public node cannot occupy a worker indefinitely.
-			probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			if err := catalog.ValidateResolvedPublicHost(probeCtx, server.Host); err != nil {
-				results <- probeResult{outcome: "destination"}
-				return
+			attempts := 1
+			if previouslyPublished[catalog.RouteKey(server)] {
+				// A single transient HTTPS/Xray failure must not evict a route
+				// that passed the previous publication. Neither attempt can
+				// exceed ten seconds, and only a new success is published.
+				attempts = 2
 			}
-			if metrics, err := r.checker.Probe(probeCtx, server); err == nil {
+			for attempt := 0; attempt < attempts; attempt++ {
+				// Bound DNS validation, Xray startup and the YouTube gate together.
+				probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				if err := catalog.ValidateResolvedPublicHost(probeCtx, server.Host); err != nil {
+					cancel()
+					results <- probeResult{outcome: "destination"}
+					return
+				}
+				metrics, err := r.checker.Probe(probeCtx, server)
+				cancel()
+				if err != nil {
+					if attempt+1 < attempts && ctx.Err() == nil {
+						continue
+					}
+					results <- probeResult{outcome: "connectivity"}
+					return
+				}
 				if !catalog.PublishCountryAllowed(metrics.CountryCode) {
 					// Do not expose exits that are intentionally unavailable for
 					// manual selection. This happens after the trace check so an
@@ -468,8 +512,7 @@ func (r *Runner) check(ctx context.Context, candidates []catalog.VLESS) ([]catal
 					server.CountryName = catalog.CountryName(metrics.CountryCode)
 				}
 				results <- probeResult{server: server, outcome: "accepted"}
-			} else {
-				results <- probeResult{outcome: "connectivity"}
+				return
 			}
 		}(server)
 	}
@@ -507,25 +550,27 @@ func (r *Runner) Run(ctx context.Context, interval time.Duration) {
 		}
 	}
 }
-func (r *Runner) fetch(ctx context.Context, source Source) ([]string, bool, error) {
+func (r *Runner) fetch(ctx context.Context, source Source, cached cachedSource) ([]string, bool, cachedSource, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, false, cached, err
 	}
-	if v := r.cache[source.URL]; v.etag != "" {
-		request.Header.Set("If-None-Match", v.etag)
-		request.Header.Set("If-Modified-Since", v.modified)
+	if cached.etag != "" {
+		request.Header.Set("If-None-Match", cached.etag)
+	}
+	if cached.modified != "" {
+		request.Header.Set("If-Modified-Since", cached.modified)
 	}
 	response, err := r.client.Do(request)
 	if err != nil {
-		return nil, false, err
+		return nil, false, cached, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotModified {
-		return r.cache[source.URL].lines, false, nil
+		return cached.lines, false, cached, nil
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("%s returned %d", source.Name, response.StatusCode)
+		return nil, false, cached, fmt.Errorf("%s returned %d", source.Name, response.StatusCode)
 	}
 	limit := source.MaxBytes
 	if limit <= 0 {
@@ -533,17 +578,17 @@ func (r *Runner) fetch(ctx context.Context, source Source) ([]string, bool, erro
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return nil, false, err
+		return nil, false, cached, err
 	}
 	if int64(len(body)) > limit {
-		return nil, false, fmt.Errorf("%s exceeded %d byte input limit", source.Name, limit)
+		return nil, false, cached, fmt.Errorf("%s exceeded %d byte input limit", source.Name, limit)
 	}
 	lines := subscriptionLines(body)
 	if len(lines) > maxSourceLines {
 		lines = lines[:maxSourceLines]
 	}
-	r.cache[source.URL] = cachedSource{etag: response.Header.Get("ETag"), modified: response.Header.Get("Last-Modified"), lines: lines}
-	return lines, true, nil
+	next := cachedSource{etag: response.Header.Get("ETag"), modified: response.Header.Get("Last-Modified"), lines: lines}
+	return lines, true, next, nil
 }
 
 // Some VLESS publishers serve one URI per line while others serve the whole
